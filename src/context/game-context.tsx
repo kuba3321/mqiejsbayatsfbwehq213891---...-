@@ -423,6 +423,14 @@ export function GameProvider({ children }: PropsWithChildren) {
   const [pendingEvent, setPendingEvent] = useState<EventOutcome | null>(null);
   const [completingEvent, setCompletingEvent] = useState(false);
   const stateRef = useRef(state);
+  // Round 1.11.9 — synchronous fetch lock. React's `isGenerating` setState is
+  // async and batched, so two rapid taps on a refresh / send button could
+  // both pass the `if (state.isGenerating) return` guard before either
+  // setState commits. This ref flips IMMEDIATELY (synchronously) inside
+  // refreshFeed / sendChatMessage / fetchSuggestions, eliminating that race.
+  // The global `state.isGenerating` is still set/cleared in parallel — that
+  // one drives the UI "disabled" affordance; this ref is the contract.
+  const isFetchingRef = useRef(false);
 
   useEffect(() => {
     stateRef.current = state;
@@ -465,20 +473,21 @@ export function GameProvider({ children }: PropsWithChildren) {
     };
   }, []);
 
-  // Persistence is gated on a "data snapshot" — only fields the player would
-  // actually lose on app quit. Modal flags, tab switches, lastToast, isGenerating,
-  // openPostId, characterProfileId, activeChatId — those flip dozens of times
-  // per session and would otherwise blow up writeAsStringAsync into a hot loop
-  // on the JS thread. We compute the snapshot, diff its serialized form against
-  // the last-saved hash, and skip the disk write if nothing meaningful changed.
+  // Round 1.11.9 — persistence uses GRANULAR deps instead of `state` so the
+  // effect doesn't re-fire (and the heavy JSON.stringify doesn't run) every
+  // time a modal flag flips or `isGenerating` toggles. We list only the
+  // fields that are actually persisted; ephemeral UI fields (composeOpen,
+  // eventOpen, lastToast, openPostId, characterProfileId, activeChatId,
+  // editingCharacterId, isGenerating, all modal-open flags) are deliberately
+  // OMITTED so they never trigger a write cycle on the main thread.
+  // lastSavedHashRef remains as a final defense for the rare case the deps
+  // change but the serialized snapshot is byte-identical.
   const lastSavedHashRef = useRef<string>("");
   useEffect(() => {
     if (!ready) return;
     const timeout = setTimeout(() => {
       const { player } = state;
       const { apiKey: _omit, ...playerWithoutKey } = player;
-      // Whitelist of "real" game-data fields. Anything not here is ephemeral
-      // UI — and a write trigger on those is exactly what made the app lag.
       const snapshot = {
         phase: state.phase,
         activeTab: state.activeTab,
@@ -509,14 +518,45 @@ export function GameProvider({ children }: PropsWithChildren) {
         hideDMsInLog: state.hideDMsInLog,
       };
       const serialized = JSON.stringify(snapshot);
-      if (serialized === lastSavedHashRef.current) return; // UI-only change → skip write
+      if (serialized === lastSavedHashRef.current) return;
       lastSavedHashRef.current = serialized;
       void FileSystem.writeAsStringAsync(GAME_STATE_PATH, serialized).catch((err) => {
-        console.error("[persist] FileSystem.writeAsStringAsync failed:", err);
+        console.warn("[persist] FileSystem.writeAsStringAsync failed:", err);
       });
     }, 800);
     return () => clearTimeout(timeout);
-  }, [ready, state]);
+    // Granular deps — only persisted fields. UI flags intentionally excluded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    ready,
+    state.phase,
+    state.activeTab,
+    state.selectedWorldId,
+    state.initializedWorldIds,
+    state.player,
+    state.day,
+    state.level,
+    state.xp,
+    state.xpRequired,
+    state.skillPoints,
+    state.stats,
+    state.mainGoalProgress,
+    state.milestones,
+    state.sideQuests,
+    state.posts,
+    state.contacts,
+    state.customCharacters,
+    state.customWorlds,
+    state.difficulty,
+    state.notifications,
+    state.activityLog,
+    state.activities,
+    state.pendingActions,
+    state.energy,
+    state.bonusEnergy,
+    state.characterOverrides,
+    state.hideDMsInLog,
+  ]);
 
   const value = useMemo<GameContextValue>(() => {
     const allCustomAndBuiltinWorlds = [...builtinWorlds, ...state.customWorlds];
@@ -725,10 +765,15 @@ export function GameProvider({ children }: PropsWithChildren) {
       },
 
       refreshFeed: async () => {
+        // Round 1.11.9 — sync fetch lock fires BEFORE any setState. Two rapid
+        // pull-to-refresh taps can't both pass this gate because the ref
+        // flips synchronously; the second tap exits immediately.
+        if (isFetchingRef.current) return;
         if (stateRef.current.isGenerating) return;
         // Consume one pending action. Empty queue → no-op.
         const next = stateRef.current.pendingActions[0];
         if (!next) return;
+        isFetchingRef.current = true;
         setState((s) => ({
           ...s,
           pendingActions: s.pendingActions.slice(1),
@@ -793,6 +838,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             if (update) setState((s) => applyWorldUpdate(s, update));
           }
         } finally {
+          isFetchingRef.current = false;
           setState((s) => ({ ...s, isGenerating: false }));
         }
       },
@@ -921,14 +967,23 @@ export function GameProvider({ children }: PropsWithChildren) {
       },
 
       fetchSuggestions: async (kind, context) => {
+        // Round 1.11.9 — guard against double-firing while another AI
+        // request is already in flight. Suggestions are non-essential UX
+        // so we just bail with empty list rather than queue up.
+        if (isFetchingRef.current) return [];
+        isFetchingRef.current = true;
         const ref = stateRef.current;
-        return generateComposeSuggestions({
-          player: ref.player,
-          world: activeWorld,
-          kind,
-          context,
-          characters: cast,
-        });
+        try {
+          return await generateComposeSuggestions({
+            player: ref.player,
+            world: activeWorld,
+            kind,
+            context,
+            characters: cast,
+          });
+        } finally {
+          isFetchingRef.current = false;
+        }
       },
 
       // ----- modal flags
@@ -1385,12 +1440,15 @@ export function GameProvider({ children }: PropsWithChildren) {
       sendChatMessage: async (characterId, text) => {
         const trimmed = text.trim();
         if (!trimmed) return;
+        // Round 1.11.9 — sync fetch lock: two rapid sends can't both pass.
+        if (isFetchingRef.current) return;
         if (stateRef.current.isGenerating) return;
         if (!consumeEnergy(stateRef.current).ok) {
           softHaptic();
           setState((s) => ({ ...s, lastToast: outOfEnergyToast() }));
           return;
         }
+        isFetchingRef.current = true;
         softHaptic();
         const sent: ChatMessage = {
           id: `m-${Date.now()}`,
@@ -1423,6 +1481,7 @@ export function GameProvider({ children }: PropsWithChildren) {
         const ref = stateRef.current;
         const character = allCharacters.find((c) => c.id === characterId);
         if (!character) {
+          isFetchingRef.current = false;
           setState((s) => ({ ...s, isGenerating: false }));
           return;
         }
@@ -1437,6 +1496,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             contact: ref.contacts[characterId],
           });
         } finally {
+          isFetchingRef.current = false;
           setState((s) => ({ ...s, isGenerating: false }));
         }
         const { reply, relationshipDelta, playerStatChanges } = result;

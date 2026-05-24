@@ -21,6 +21,12 @@ type LLMOptions = {
   jsonResponse?: boolean;
 };
 
+// Round 1.11.9 — hard 4-second network ceiling for every provider call.
+// AbortController triggers if the LLM takes too long; the offline content
+// branch picks up immediately. Centralised here so the per-provider helpers
+// stay readable.
+const NETWORK_TIMEOUT_MS = 4000;
+
 async function callOpenAI(player: PlayerProfile, opts: LLMOptions) {
   const model = player.model.trim() || "gpt-4o-mini";
   const body: Record<string, unknown> = {
@@ -38,14 +44,29 @@ async function callOpenAI(player: PlayerProfile, opts: LLMOptions) {
     body.response_format = { type: "json_object" };
   }
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${player.apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${player.apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    // AbortError = our 4s timeout fired. Quietly bail to the offline branch.
+    if ((err as { name?: string })?.name === "AbortError") {
+      console.warn("[ai] OpenAI request aborted (4s timeout) — falling back to offline.");
+      throw new Error("OpenAI timeout");
+    }
+    throw err;
+  }
+  clearTimeout(timeoutId);
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
@@ -72,24 +93,38 @@ async function callOpenAI(player: PlayerProfile, opts: LLMOptions) {
 
 async function callAnthropic(player: PlayerProfile, opts: LLMOptions) {
   const model = player.model.trim() || "claude-sonnet-4-6";
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": player.apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: opts.maxTokens ?? 320,
-      system: opts.system,
-      temperature: opts.temperature ?? 0.85,
-      messages: opts.messages.map((m) => ({
-        role: m.role === "system" ? "user" : m.role,
-        content: m.content,
-      })),
-    }),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": player.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: opts.maxTokens ?? 320,
+        system: opts.system,
+        temperature: opts.temperature ?? 0.85,
+        messages: opts.messages.map((m) => ({
+          role: m.role === "system" ? "user" : m.role,
+          content: m.content,
+        })),
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if ((err as { name?: string })?.name === "AbortError") {
+      console.warn("[ai] Anthropic request aborted (4s timeout) — falling back to offline.");
+      throw new Error("Anthropic timeout");
+    }
+    throw err;
+  }
+  clearTimeout(timeoutId);
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
@@ -111,27 +146,41 @@ async function callAnthropic(player: PlayerProfile, opts: LLMOptions) {
 
 async function callGemini(player: PlayerProfile, opts: LLMOptions) {
   const model = player.model.trim() || "gemini-2.5-flash";
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(player.apiKey)}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: opts.system }] },
-        contents: opts.messages.map((m) => ({
-          role: m.role === "assistant" ? "model" : "user",
-          parts: [{ text: m.content }],
-        })),
-        generationConfig: {
-          temperature: opts.temperature ?? 0.85,
-          maxOutputTokens: opts.maxTokens ?? 320,
-          ...(opts.jsonResponse
-            ? { responseMimeType: "application/json" }
-            : {}),
-        },
-      }),
-    },
-  );
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(player.apiKey)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: opts.system }] },
+          contents: opts.messages.map((m) => ({
+            role: m.role === "assistant" ? "model" : "user",
+            parts: [{ text: m.content }],
+          })),
+          generationConfig: {
+            temperature: opts.temperature ?? 0.85,
+            maxOutputTokens: opts.maxTokens ?? 320,
+            ...(opts.jsonResponse
+              ? { responseMimeType: "application/json" }
+              : {}),
+          },
+        }),
+        signal: controller.signal,
+      },
+    );
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if ((err as { name?: string })?.name === "AbortError") {
+      console.warn("[ai] Gemini request aborted (4s timeout) — falling back to offline.");
+      throw new Error("Gemini timeout");
+    }
+    throw err;
+  }
+  clearTimeout(timeoutId);
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
