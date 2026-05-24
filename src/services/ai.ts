@@ -1405,7 +1405,11 @@ Generate 2-4 relationshipShifts, 2-3 posts, 1-2 notifications, and (for each pos
     const text = await runLLM(args.player, {
       system,
       messages: [{ role: "user", content: userMsg }],
-      maxTokens: 900,
+      // Round 1.11.21 — bumped from 900 to 1200 to absorb worst-case dense
+      // payloads (2-3 posts × 5-12 threadReplies + 4 fan posts each with
+      // their own threadReplies + 2-4 relationshipShifts + notifications).
+      // 900 was cutting tail entries mid-string ("characterId": "tyler", "text...").
+      maxTokens: 1200,
       temperature: 0.85,
       jsonResponse: true,
     });
@@ -1739,7 +1743,12 @@ playerStatChanges represents how this post lands for the player's Humor / Aura s
     const text = await runLLM(args.player, {
       system,
       messages: [{ role: "user", content: args.postText }],
-      maxTokens: 900,
+      // Round 1.11.21 — bumped 900 → 1200. Real-world payload (7-8 replies
+      // × 30-80 tokens + 3 relationshipShifts with reasons + metrics +
+      // playerStatChanges + JSON overhead) hits ~1000-1100 tokens in worst
+      // case. The old 900 cap truncated tail entries mid-string. 1200 gives
+      // a 100-token safety buffer; still fits in the 7s NETWORK_TIMEOUT_MS.
+      maxTokens: 1200,
       temperature: 0.95,
       jsonResponse: true,
     });
