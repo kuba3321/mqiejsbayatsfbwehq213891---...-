@@ -1,0 +1,82 @@
+{
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\app.json": {
+    "mtime": 1779434107.2097297,
+    "ast_hash": "1eb36e63d51b6dab4df2ce65cde48055",
+    "semantic_hash": "1eb36e63d51b6dab4df2ce65cde48055"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\babel.config.js": {
+    "mtime": 1779391356.4489744,
+    "ast_hash": "dec8854defeb87c365f4e2c4209a3bbb",
+    "semantic_hash": "dec8854defeb87c365f4e2c4209a3bbb"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\package.json": {
+    "mtime": 1779462964.400605,
+    "ast_hash": "c22af0ca60b41bfaa2351d2c5c1ac33c",
+    "semantic_hash": "c22af0ca60b41bfaa2351d2c5c1ac33c"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\tsconfig.json": {
+    "mtime": 1779393238.9290016,
+    "ast_hash": "79a301bc61d07c2e1219f4c470037192",
+    "semantic_hash": "79a301bc61d07c2e1219f4c470037192"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\.claude\\launch.json": {
+    "mtime": 1779436500.25477,
+    "ast_hash": "4aa88e24091c25a393b3115d59c119e8",
+    "semantic_hash": "4aa88e24091c25a393b3115d59c119e8"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\.claude\\settings.local.json": {
+    "mtime": 1779465972.1508985,
+    "ast_hash": "60b24849fb4afb6be78ca10d28383fb6",
+    "semantic_hash": "60b24849fb4afb6be78ca10d28383fb6"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\app\\index.tsx": {
+    "mtime": 1779391356.5800822,
+    "ast_hash": "bad4eb101eb179ba94f32ee1d0857cb0",
+    "semantic_hash": "bad4eb101eb179ba94f32ee1d0857cb0"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\app\\_layout.tsx": {
+    "mtime": 1779391634.2188182,
+    "ast_hash": "1c062b430ec46919cd6a825956ac4f22",
+    "semantic_hash": "1c062b430ec46919cd6a825956ac4f22"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\src\\components\\primitives.tsx": {
+    "mtime": 1779463439.5256474,
+    "ast_hash": "67bedf77b67b28b1064dcbbd5c410a9b",
+    "semantic_hash": "67bedf77b67b28b1064dcbbd5c410a9b"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\src\\components\\status-native-app.tsx": {
+    "mtime": 1779481758.825483,
+    "ast_hash": "518d03a5c04c0d090d1cbef9530f4f73",
+    "semantic_hash": "518d03a5c04c0d090d1cbef9530f4f73"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\src\\context\\game-context.tsx": {
+    "mtime": 1779481712.4744852,
+    "ast_hash": "4924340565c644604bb5128cf5666158",
+    "semantic_hash": "4924340565c644604bb5128cf5666158"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\src\\data\\types.ts": {
+    "mtime": 1779481171.572255,
+    "ast_hash": "a238425b4d961092f36f35a4ef22dcf5",
+    "semantic_hash": "a238425b4d961092f36f35a4ef22dcf5"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\src\\data\\worlds.ts": {
+    "mtime": 1779481793.4198585,
+    "ast_hash": "c6c7e69cfc317b14665a8d091f2f8c41",
+    "semantic_hash": "c6c7e69cfc317b14665a8d091f2f8c41"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\src\\services\\ai.ts": {
+    "mtime": 1779481530.1681752,
+    "ast_hash": "84f0e253118d8b7ec8385527e8d774d0",
+    "semantic_hash": "84f0e253118d8b7ec8385527e8d774d0"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\src\\services\\sentiment.ts": {
+    "mtime": 1779462797.602434,
+    "ast_hash": "940b21c75834308b56a4d02bec786e68",
+    "semantic_hash": "940b21c75834308b56a4d02bec786e68"
+  },
+  "C:\\Users\\kubap\\Desktop\\projects\\status\\README.md": {
+    "mtime": 1779393634.6235497,
+    "ast_hash": "08861b27d05aba43fd053509008f6f6e",
+    "semantic_hash": "08861b27d05aba43fd053509008f6f6e"
+  }
+}
