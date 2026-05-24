@@ -1329,8 +1329,13 @@ export async function generateWorldUpdate(args: {
   contacts: Record<string, { vibe: number; chemistryLabel: string }>;
   recentPlayerActions: string[];
 }): Promise<WorldUpdate> {
-  // No API key configured — go straight to rich offline content.
-  if (!args.player.apiKey.trim()) {
+  // Round 1.11.16 — symmetric with generatePostReplies. Bail to offline when
+  // EITHER the API key is missing OR the cast is empty. Empty-cast online
+  // calls were burning tokens, risking AI hallucinating cast IDs the player
+  // doesn't have (→ silent drop in UI), and paying the 4s AbortController
+  // ceiling for content that buildOfflineWorldUpdate produces deterministically
+  // (4 fan posts + 0 celebs by the 60% × []) instantly.
+  if (!args.player.apiKey.trim() || args.characters.length === 0) {
     return buildOfflineWorldUpdate(args);
   }
 
