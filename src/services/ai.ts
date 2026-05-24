@@ -1115,19 +1115,61 @@ const offlineFanComments = [
   "this radicalized me toward joy",
 ];
 
+// Round 1.11.15 — scenario-flavored fan COMMENT banks (for thread replies
+// under world-update posts). Used by buildOfflineThreadReplies when the
+// active world matches. Falls back to generic offlineFanComments otherwise.
+const scenarioFanCommentBank: Record<string, string[]> = {
+  "regency-feed": [
+    "screaming. SCREAMING into my fan. why is this so good",
+    "delete this scroll i was not emotionally prepared",
+    "the calligraphy of this missive deserves a study",
+    "this is the kind of letter that gets sewn into a sampler",
+    "i'm composed. i'm composed. i'm not composed.",
+    "TELL ME WHICH RAKE HURT YOU SO I CAN SEND THEM A SCATHING NOTE",
+    "imagine being this unbothered at a ball. couldn't be me",
+    "this letter + my chaperone's commentary = balanced morning",
+    "ok but the wax seal IS the move and you know it",
+    "anyway, follow back duchess ✨",
+    "why did this make me cry in the conservatory",
+    "the way i ran to whistledown. archaeology will study this",
+    "okay LADY. okay. we see you.",
+  ],
+  "academy-chaos": [
+    "screaming in the common room. SCREAMING. why is this hex so good",
+    "delete this scroll i was not magically prepared",
+    "ok but the rune-work on this caption deserves a study",
+    "the way i ran to the divination tower. astronomy will study this",
+    "this is the kind of post that gets pinned on the great hall wall",
+    "i'm sane. i'm sane. i'm being controlled by an enchanted parchment.",
+    "TELL ME WHICH PROFESSOR HURT YOU SO I CAN HEX THEM",
+    "imagine being this unbothered during finals. couldn't be me",
+    "this charm + my therapy bill = balanced check",
+    "ok but the @ tag is THE move and you know it",
+    "why did this make me cry in the herbology greenhouse",
+    "okay PROFESSOR. okay. we see you in the corridor.",
+    "frantic checking if i missed a hex in transfiguration. i didn't. it's just THAT.",
+  ],
+};
+
 function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-function buildOfflineThreadReplies(fans: string[]): Array<{ characterId: string; text: string }> {
+// Round 1.11.15 — accepts an optional `commentBank` for scenario-aware
+// comment voice (Bridgerton fans don't write about espresso). Falls back
+// to the generic offlineFanComments when no scenario override is passed.
+function buildOfflineThreadReplies(
+  fans: string[],
+  commentBank: string[] = offlineFanComments,
+): Array<{ characterId: string; text: string }> {
   const count = 5 + Math.floor(Math.random() * 8); // 5–12
   const out: Array<{ characterId: string; text: string }> = [];
   const usedComments = new Set<string>();
   for (let i = 0; i < count; i++) {
-    let text = pickRandom(offlineFanComments);
+    let text = pickRandom(commentBank);
     let attempts = 0;
     while (usedComments.has(text) && attempts < 6) {
-      text = pickRandom(offlineFanComments);
+      text = pickRandom(commentBank);
       attempts++;
     }
     usedComments.add(text);
@@ -1146,6 +1188,7 @@ function buildOneFanPost(
   usedAuthors: Set<string>,
   usedLines: Set<string>,
   lineBank: string[] = offlineFanPostBank,
+  commentBank: string[] = offlineFanComments,
 ): { characterId: string; text: string; threadReplies: Array<{ characterId: string; text: string }> } {
   const fanIds = anonymousFanIds;
   let author = pickRandom(fanIds);
@@ -1165,7 +1208,7 @@ function buildOneFanPost(
   return {
     characterId: author,
     text,
-    threadReplies: buildOfflineThreadReplies(fanIds).slice(
+    threadReplies: buildOfflineThreadReplies(fanIds, commentBank).slice(
       0,
       2 + Math.floor(Math.random() * 4),
     ),
@@ -1207,10 +1250,12 @@ function buildOfflineWorldUpdate(args: {
       `${c.name.split(" ")[0]} types, deletes, then types again. you can feel the energy.`,
     ]);
   };
-  // Fan posts also pull from a scenario-specific bank when one exists, with
-  // fallback to the generic everyday-user bank.
+  // Fan posts and fan comments both pull from scenario-specific banks when
+  // one exists, with fallback to the generic everyday-user banks.
   const fanScenarioBank = args.world ? scenarioFanPostBanks[args.world.id] : undefined;
   const fanLineBank = fanScenarioBank ?? offlineFanPostBank;
+  const fanCommentScenarioBank = args.world ? scenarioFanCommentBank[args.world.id] : undefined;
+  const fanCommentLineBank = fanCommentScenarioBank ?? offlineFanComments;
   // 1. Celebs — each gets a 60% chance to post. NO upper limit (lets the
   //    whole cast appear when the dice favor them).
   const celebPosts = args.characters
@@ -1218,16 +1263,17 @@ function buildOfflineWorldUpdate(args: {
     .map((c) => ({
       characterId: c.id,
       text: pickLineFor(c),
-      threadReplies: buildOfflineThreadReplies(fanIds),
+      threadReplies: buildOfflineThreadReplies(fanIds, fanCommentLineBank),
     }));
   // 2. Fans — ALWAYS exactly 4 unique fan posts (per user requirement
   //    "bezwarunkowo i bezwyjątkowo"). Dedup by author and text. Pulls
-  //    from scenario-specific fan bank when available.
+  //    from scenario-specific fan bank when available; their thread replies
+  //    pull from the scenario-specific COMMENT bank.
   const usedFanAuthors = new Set<string>();
   const usedFanLines = new Set<string>();
   const fanPosts: WorldUpdate["posts"] = [];
   for (let i = 0; i < 4; i++) {
-    fanPosts.push(buildOneFanPost(usedFanAuthors, usedFanLines, fanLineBank));
+    fanPosts.push(buildOneFanPost(usedFanAuthors, usedFanLines, fanLineBank, fanCommentLineBank));
   }
   // 3. Shuffle the combined list — interleaves celeb and fan posts naturally
   //    instead of stacking them in two blocks.
@@ -1359,8 +1405,17 @@ Generate 2-4 relationshipShifts, 2-3 posts, 1-2 notifications, and (for each pos
       );
       const usedFanLines = new Set<string>(fanPostsFromAI.map((p) => p.text));
       const paddedFans: WorldUpdate["posts"] = [...fanPostsFromAI];
+      // Round 1.11.15 — scenario-aware fan-post and fan-comment banks for
+      // online padding too. Without this, fan posts force-injected when AI
+      // returned <4 would be off-topic (e.g. espresso talk in Bridgerton).
+      const padFanLineBank =
+        scenarioFanPostBanks[args.world.id] ?? offlineFanPostBank;
+      const padFanCommentBank =
+        scenarioFanCommentBank[args.world.id] ?? offlineFanComments;
       while (paddedFans.length < 4) {
-        paddedFans.push(buildOneFanPost(usedFanAuthors, usedFanLines));
+        paddedFans.push(
+          buildOneFanPost(usedFanAuthors, usedFanLines, padFanLineBank, padFanCommentBank),
+        );
       }
       if (paddedFans.length > 4) paddedFans.length = 4;
       // Shuffle combined so fans interleave with celebs.
@@ -1496,6 +1551,43 @@ const offlineFanReplyBank = [
   "frantic checking if i missed context. i didn't. it's just THAT.",
 ];
 
+// Round 1.11.15 — scenario-flavored fan REPLY banks (different from fan POST
+// banks). Used inside buildOfflinePostReplies under player posts in offline
+// mode so bots don't quote about espresso when we're playing Bridgerton.
+// Falls back to the default offlineFanReplyBank when the active world has
+// no scenario entry (custom worlds, accidentally-famous).
+const scenarioFanReplyBank: Record<string, string[]> = {
+  "regency-feed": [
+    "screaming into my fan. SCREAMING. why is this so good",
+    "delete this scroll i was not emotionally prepared",
+    "ok but the calligraphy of this missive deserves a study",
+    "you wrote one sentence and shifted the ton. fine.",
+    "the way i ran to whistledown. archaeology will study this",
+    "this is the kind of letter that gets framed above the mantle",
+    "i'm composed. i'm composed. i'm not composed.",
+    "TELL ME WHICH LADY HURT YOU SO I CAN SEND THEM A BASKET",
+    "imagine being this unbothered at a ball. couldn't be me",
+    "this missive radicalized me toward romance",
+    "ok but the @ tag in this letter is THE move and you know it",
+    "okay LORD. okay. we see you in the box seats.",
+    "frantic checking if i missed a whistledown drop. i didn't. it's just THAT.",
+  ],
+  "academy-chaos": [
+    "screaming in the common room. SCREAMING. why is this hex so good",
+    "delete this scroll i was not magically prepared",
+    "ok but the rune-work on this caption deserves a NEWT-level study",
+    "you cast one charm and shifted the house cup. fine.",
+    "the way i ran to the divination tower. astronomy will study this",
+    "this is the kind of post that gets pinned on the great hall wall",
+    "i'm sane. i'm sane. i'm being controlled by an enchanted parchment.",
+    "TELL ME WHICH PROFESSOR HURT YOU SO I CAN HEX THEM",
+    "imagine being this unbothered during finals. couldn't be me",
+    "this radicalized me toward illegal potions",
+    "okay PROFESSOR. okay. we see you in the corridor.",
+    "frantic checking if i missed a hex in herbology. i didn't. it's just THAT.",
+  ],
+};
+
 function pickRandomReply<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -1509,21 +1601,29 @@ function pickRandomReply<T>(arr: T[]): T {
 function buildOfflinePostReplies(args: {
   postText: string;
   characters: Character[];
-}): PostRepliesResult | null {
-  if (args.characters.length === 0) return null;
+  // Round 1.11.15 — optional world for scenario-aware fan reply voice.
+  world?: World;
+}): PostRepliesResult {
+  // Round 1.11.15 — empty cast is NO LONGER a failure case. Fans always
+  // reply even when the player hasn't added any celebrity to their contacts.
+  // The feed should never look dead on Day 1.
   const shuffled = [...args.characters].sort(() => Math.random() - 0.5);
   // Match the online prompt: only 2-3 celebrities ever reply, not the whole cast.
   const celebCount = 2 + Math.floor(Math.random() * 2); // 2 or 3
   const celebrities = shuffled.slice(0, Math.min(celebCount, shuffled.length));
   const fanCount = 4 + Math.floor(Math.random() * 6); // 4-9 fans
   const fanIds = anonymousFanIds;
+  // Scenario-aware fan reply bank — falls back to generic offlineFanReplyBank
+  // when the active world has no scenario entry.
+  const fanReplyLineBank =
+    (args.world && scenarioFanReplyBank[args.world.id]) ?? offlineFanReplyBank;
   const usedFanLines = new Set<string>();
   const fans: Array<{ characterId: string; text: string }> = [];
   for (let i = 0; i < fanCount; i++) {
-    let text = pickRandomReply(offlineFanReplyBank);
+    let text = pickRandomReply(fanReplyLineBank);
     let attempts = 0;
     while (usedFanLines.has(text) && attempts < 5) {
-      text = pickRandomReply(offlineFanReplyBank);
+      text = pickRandomReply(fanReplyLineBank);
       attempts++;
     }
     usedFanLines.add(text);
@@ -1568,8 +1668,9 @@ export async function generatePostReplies(args: {
   originalAuthor?: string;
   contextReplyText?: string;
 }): Promise<PostRepliesResult | null> {
-  // No API key OR empty cast — straight to offline fallback. (Empty cast still
-  // returns null because there's nobody for the reply thread to come from.)
+  // Round 1.11.15 — no API key OR empty cast → offline fallback. Empty cast
+  // no longer returns null; buildOfflinePostReplies produces fan-only replies
+  // so the feed stays alive even on Day 1 before the player has added celebs.
   if (!args.player.apiKey.trim() || args.characters.length === 0) {
     return buildOfflinePostReplies(args);
   }

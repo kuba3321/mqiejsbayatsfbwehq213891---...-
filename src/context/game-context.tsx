@@ -770,21 +770,25 @@ export function GameProvider({ children }: PropsWithChildren) {
         // flips synchronously; the second tap exits immediately.
         if (isFetchingRef.current) return;
         if (stateRef.current.isGenerating) return;
-        // Consume one pending action. Empty queue → no-op.
+        // Round 1.11.15 — IDLE PULL-TO-REFRESH: if no pending action is
+        // queued, treat this as an ambient daily-tick. The feed must still
+        // breathe — fans and media post even when the player is idle.
+        // No more "silent return on empty queue".
         const next = stateRef.current.pendingActions[0];
-        if (!next) return;
         isFetchingRef.current = true;
         setState((s) => ({
           ...s,
-          pendingActions: s.pendingActions.slice(1),
+          pendingActions: next ? s.pendingActions.slice(1) : s.pendingActions,
           isGenerating: true,
         }));
 
         try {
-          if (next.kind === "post-replies") {
+          if (next?.kind === "post-replies") {
             const post = stateRef.current.posts.find((p) => p.id === next.payload.postId);
             if (!post) return;
-            if (cast.length === 0) return;
+            // Round 1.11.15 — cast.length===0 NO LONGER blocks post-replies.
+            // buildOfflinePostReplies returns fan-only replies when cast is
+            // empty, so even Day 1 / no-cast players get organic engagement.
             const contextReplyId = next.payload.contextReplyId;
             const contextReply = contextReplyId
               ? post.threadReplies.find((r) => r.id === contextReplyId)
@@ -814,29 +818,30 @@ export function GameProvider({ children }: PropsWithChildren) {
             return;
           }
 
-          if (
-            next.kind === "event-aftermath" ||
-            next.kind === "activity-aftermath" ||
-            next.kind === "daily-tick"
-          ) {
-            if (cast.length === 0) return;
-            const update = await generateWorldUpdate({
-              player: stateRef.current.player,
-              world: activeWorld,
-              day: stateRef.current.day,
-              characters: cast,
-              contacts: Object.fromEntries(
-                Object.entries(stateRef.current.contacts).map(([id, c]) => [
-                  id,
-                  { vibe: c.vibe, chemistryLabel: c.chemistryLabel },
-                ]),
-              ),
-              recentPlayerActions: stateRef.current.activityLog
-                .slice(0, 6)
-                .map((l) => `Day ${l.day}: ${l.title} — ${l.body ?? ""}`),
-            });
-            if (update) setState((s) => applyWorldUpdate(s, update));
-          }
+          // Round 1.11.15 — world-update branch handles:
+          //   * explicit event-aftermath / activity-aftermath / daily-tick
+          //     pending actions (consumed from the queue above)
+          //   * AMBIENT refresh when there is NO pending action at all
+          //     (idle pull-to-refresh from a calm timeline)
+          // cast.length === 0 NO LONGER blocks — generateWorldUpdate's offline
+          // path always produces 4 fan posts (and online path includes fans
+          // via the prompt + post-parse padding contract).
+          const update = await generateWorldUpdate({
+            player: stateRef.current.player,
+            world: activeWorld,
+            day: stateRef.current.day,
+            characters: cast,
+            contacts: Object.fromEntries(
+              Object.entries(stateRef.current.contacts).map(([id, c]) => [
+                id,
+                { vibe: c.vibe, chemistryLabel: c.chemistryLabel },
+              ]),
+            ),
+            recentPlayerActions: stateRef.current.activityLog
+              .slice(0, 6)
+              .map((l) => `Day ${l.day}: ${l.title} — ${l.body ?? ""}`),
+          });
+          if (update) setState((s) => applyWorldUpdate(s, update));
         } finally {
           isFetchingRef.current = false;
           setState((s) => ({ ...s, isGenerating: false }));
