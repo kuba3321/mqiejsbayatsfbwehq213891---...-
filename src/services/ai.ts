@@ -21,11 +21,19 @@ type LLMOptions = {
   jsonResponse?: boolean;
 };
 
-// Round 1.11.9 — hard 4-second network ceiling for every provider call.
-// AbortController triggers if the LLM takes too long; the offline content
-// branch picks up immediately. Centralised here so the per-provider helpers
-// stay readable.
-const NETWORK_TIMEOUT_MS = 4000;
+// Round 1.11.20 — network ceiling bumped from 4000 → 7000 ms.
+// Rationale: dense JSON calls (generateWorldUpdate / generatePostReplies with
+// 900 maxTokens) take ~5-6s on Gemini Flash / GPT-4o-mini even on a healthy
+// network. The previous 4s aborted them mid-stream, forcing every refresh
+// onto the offline path despite a working API key. 7s gives the model
+// breathing room while still capping outages (real network failures usually
+// surface in <1s as fetch reject).
+//
+// Future improvement: per-call timeout scaled to opts.maxTokens
+// (e.g. Math.max(3000, opts.maxTokens * 8)). Kept as a single constant for
+// now to minimise blast radius — promote to dynamic only if 7s is still
+// too tight for any specific endpoint.
+const NETWORK_TIMEOUT_MS = 7000;
 
 async function callOpenAI(player: PlayerProfile, opts: LLMOptions) {
   const model = player.model.trim() || "gpt-4o-mini";
@@ -145,7 +153,13 @@ async function callAnthropic(player: PlayerProfile, opts: LLMOptions) {
 }
 
 async function callGemini(player: PlayerProfile, opts: LLMOptions) {
-  const model = player.model.trim() || "gemini-2.5-flash";
+  // Round 1.11.20 — default switched from "gemini-2.5-flash" (preview) to
+  // "gemini-2.0-flash" (production-stable). The 2.5 preview occasionally
+  // ignores `responseMimeType: "application/json"` and replies with a
+  // chat-style preamble ("Here is the JSON requested:\n```json\n..."),
+  // which leaks through safeParseJSON. 2.0-flash respects structured-output
+  // contract reliably. Player can still override via PlayerProfile.model.
+  const model = player.model.trim() || "gemini-2.0-flash";
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
   let response;
