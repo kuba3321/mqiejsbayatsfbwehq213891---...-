@@ -35,6 +35,16 @@ type LLMOptions = {
 // too tight for any specific endpoint.
 const NETWORK_TIMEOUT_MS = 7000;
 
+// Round 1.11.23 — module-level cooldown state for Gemini 429 rate-limit
+// handling. When a 429 lands, we parse the API's "Please retry in Xs" hint
+// and stamp `geminiCooldownUntilMs` accordingly. Subsequent calls to
+// callGemini check this gate FIRST and throw immediately if the cooldown
+// is still active — the catch in the calling generator then routes to the
+// offline path WITHOUT issuing another doomed network request. This stops
+// the burst of repeated 429s we saw in 1.11.22 diagnostics. Cooldown is
+// cleared automatically when Date.now() crosses the stamp.
+let geminiCooldownUntilMs = 0;
+
 async function callOpenAI(player: PlayerProfile, opts: LLMOptions) {
   const model = player.model.trim() || "gpt-4o-mini";
   const body: Record<string, unknown> = {
@@ -153,6 +163,15 @@ async function callAnthropic(player: PlayerProfile, opts: LLMOptions) {
 }
 
 async function callGemini(player: PlayerProfile, opts: LLMOptions) {
+  // Round 1.11.23 — rate-limit cooldown gate. If we just hit 429, the API
+  // told us "retry in Xs". Honor it — skip the call entirely and throw so
+  // the caller routes to offline. This is the SINGLE most important
+  // change for free-tier stability; previously every refresh inside the
+  // cooldown window was burning another 429 response.
+  if (Date.now() < geminiCooldownUntilMs) {
+    const secondsLeft = Math.ceil((geminiCooldownUntilMs - Date.now()) / 1000);
+    throw new Error(`Gemini cooldown (${secondsLeft}s remaining)`);
+  }
   // Round 1.11.20 — default switched from "gemini-2.5-flash" (preview) to
   // "gemini-2.0-flash" (production-stable). The 2.5 preview occasionally
   // ignores `responseMimeType: "application/json"` and replies with a
@@ -198,10 +217,22 @@ async function callGemini(player: PlayerProfile, opts: LLMOptions) {
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
-    // 503 High Demand / 429 Rate Limit / 401 Invalid Key — all recoverable.
-    // console.warn keeps Expo Go's LogBox calm; the throw still triggers the
-    // offline fallback in the generator that called us.
-    console.warn(`[ai] Gemini ${response.status}:`, errText.slice(0, 500));
+    // Round 1.11.23 — on 429, parse the API's "Please retry in Xs" hint
+    // and stamp the module-level cooldown. Default to 60s if message
+    // doesn't carry a parseable retry hint.
+    if (response.status === 429) {
+      const retryMatch = errText.match(/retry in ([\d.]+)s/i);
+      const retrySeconds = retryMatch ? parseFloat(retryMatch[1]) : 60;
+      geminiCooldownUntilMs = Date.now() + retrySeconds * 1000;
+      console.warn(
+        `[ai] Gemini 429 quota exhausted — cooldown for ${retrySeconds.toFixed(1)}s. ` +
+        `Tip: consider switching player.model to "gemini-2.0-flash" (production tier has higher RPM than 2.5 preview).`,
+      );
+    } else {
+      // 503 High Demand / 401 Invalid Key — recoverable, warn level
+      // keeps Expo Go's LogBox calm; the throw triggers offline fallback.
+      console.warn(`[ai] Gemini ${response.status}:`, errText.slice(0, 500));
+    }
     throw new Error(`Gemini ${response.status}`);
   }
 
@@ -1243,7 +1274,11 @@ function buildOneFanPost(
 //   * Combined list is shuffled so celebs and fans interleave chaotically,
 //     matching the organic texture of a real X timeline.
 //   * Net density target: 7-9 posts per day.
-function buildOfflineWorldUpdate(args: {
+// Round 1.11.23 — exported so game-context's ambient pull-to-refresh path
+// can call it directly (skipping the AI round-trip entirely for low-stakes
+// idle refreshes). Saves ~30-50% of AI calls in a calm session, leaving
+// the free-tier quota for player-action-driven refreshes.
+export function buildOfflineWorldUpdate(args: {
   characters: Character[];
   world?: World;
 }): WorldUpdate {
@@ -1407,12 +1442,12 @@ Generate 2-4 relationshipShifts, 2-3 posts, 1-2 notifications, and (for each pos
     const text = await runLLM(args.player, {
       system,
       messages: [{ role: "user", content: userMsg }],
-      // Round 1.11.22 — bumped 1200 → 1500. Even 1200 was truncating at
-      // worst-case payload (3 posts × 12 threadReplies × ~35 tokens each ≈
-      // 1260 just for threadReplies). Combined with prompt-side reduction
-      // of threadReplies from 5-12 → 3-5 below, typical output now lands
-      // ~700-1100 tokens with a comfortable buffer to 1500.
-      maxTokens: 1500,
+      // Round 1.11.23 — bumped 1500 → 2000. Diagnostic logs from 1.11.22
+      // showed 2.5-flash hitting MAX_TOKENS at 1500 even with the prompt-side
+      // reduction. The preview model is more verbose than 2.0-flash and may
+      // not strictly honor maxOutputTokens config. 2000 gives bigger margin;
+      // still fits in 7s NETWORK_TIMEOUT (Gemini Flash ~300 tok/s).
+      maxTokens: 2000,
       temperature: 0.85,
       jsonResponse: true,
     });
@@ -1752,12 +1787,12 @@ playerStatChanges represents how this post lands for the player's Humor / Aura s
     const text = await runLLM(args.player, {
       system,
       messages: [{ role: "user", content: args.postText }],
-      // Round 1.11.21 — bumped 900 → 1200. Real-world payload (7-8 replies
-      // × 30-80 tokens + 3 relationshipShifts with reasons + metrics +
-      // playerStatChanges + JSON overhead) hits ~1000-1100 tokens in worst
-      // case. The old 900 cap truncated tail entries mid-string. 1200 gives
-      // a 100-token safety buffer; still fits in the 7s NETWORK_TIMEOUT_MS.
-      maxTokens: 1200,
+      // Round 1.11.23 — bumped 1200 → 1500 to match the 2.5-flash verbosity
+      // pattern observed in 1.11.22 diagnostics. Worst-case post-replies
+      // payload (8 replies × 30-80 tokens + 3 shifts + metrics + stats)
+      // is ~1100 tokens but the preview model padded responses sometimes
+      // overshoot. 1500 gives ~30% safety buffer.
+      maxTokens: 1500,
       temperature: 0.95,
       jsonResponse: true,
     });

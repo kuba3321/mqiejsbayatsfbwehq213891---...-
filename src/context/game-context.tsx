@@ -51,6 +51,7 @@ import {
   generatePostReplies,
   generateScenario,
   generateWorldUpdate,
+  buildOfflineWorldUpdate,
   requestCelebrityReply,
   resolveEventChoice,
 } from "@/services/ai";
@@ -818,30 +819,39 @@ export function GameProvider({ children }: PropsWithChildren) {
             return;
           }
 
-          // Round 1.11.15 — world-update branch handles:
-          //   * explicit event-aftermath / activity-aftermath / daily-tick
-          //     pending actions (consumed from the queue above)
-          //   * AMBIENT refresh when there is NO pending action at all
-          //     (idle pull-to-refresh from a calm timeline)
-          // cast.length === 0 NO LONGER blocks — generateWorldUpdate's offline
-          // path always produces 4 fan posts (and online path includes fans
-          // via the prompt + post-parse padding contract).
-          const update = await generateWorldUpdate({
-            player: stateRef.current.player,
-            world: activeWorld,
-            day: stateRef.current.day,
-            characters: cast,
-            contacts: Object.fromEntries(
-              Object.entries(stateRef.current.contacts).map(([id, c]) => [
-                id,
-                { vibe: c.vibe, chemistryLabel: c.chemistryLabel },
-              ]),
-            ),
-            recentPlayerActions: stateRef.current.activityLog
-              .slice(0, 6)
-              .map((l) => `Day ${l.day}: ${l.title} — ${l.body ?? ""}`),
-          });
-          if (update) setState((s) => applyWorldUpdate(s, update));
+          // Round 1.11.23 — split AMBIENT (no pending action) from EXPLICIT
+          // (event-aftermath / activity-aftermath / daily-tick) refreshes.
+          // Ambient pulls are "idle background noise" — the player isn't
+          // waiting for a specific outcome — so we ALWAYS use the offline
+          // generator there. Saves ~30-50% of AI calls in a calm session,
+          // leaving free-tier RPM budget for high-stakes refreshes (post
+          // replies, event aftermath) where AI quality genuinely matters.
+          // Explicit refreshes still go online (with offline fallback on
+          // 429 / parse-fail via the existing generateWorldUpdate path).
+          if (!next) {
+            const update = buildOfflineWorldUpdate({
+              characters: cast,
+              world: activeWorld,
+            });
+            setState((s) => applyWorldUpdate(s, update));
+          } else {
+            const update = await generateWorldUpdate({
+              player: stateRef.current.player,
+              world: activeWorld,
+              day: stateRef.current.day,
+              characters: cast,
+              contacts: Object.fromEntries(
+                Object.entries(stateRef.current.contacts).map(([id, c]) => [
+                  id,
+                  { vibe: c.vibe, chemistryLabel: c.chemistryLabel },
+                ]),
+              ),
+              recentPlayerActions: stateRef.current.activityLog
+                .slice(0, 6)
+                .map((l) => `Day ${l.day}: ${l.title} — ${l.body ?? ""}`),
+            });
+            if (update) setState((s) => applyWorldUpdate(s, update));
+          }
         } finally {
           isFetchingRef.current = false;
           setState((s) => ({ ...s, isGenerating: false }));
