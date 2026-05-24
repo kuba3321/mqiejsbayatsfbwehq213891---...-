@@ -21,19 +21,11 @@ type LLMOptions = {
   jsonResponse?: boolean;
 };
 
-// Round 1.11.20 — network ceiling bumped from 4000 → 7000 ms.
-// Rationale: dense JSON calls (generateWorldUpdate / generatePostReplies with
-// 900 maxTokens) take ~5-6s on Gemini Flash / GPT-4o-mini even on a healthy
-// network. The previous 4s aborted them mid-stream, forcing every refresh
-// onto the offline path despite a working API key. 7s gives the model
-// breathing room while still capping outages (real network failures usually
-// surface in <1s as fetch reject).
-//
-// Future improvement: per-call timeout scaled to opts.maxTokens
-// (e.g. Math.max(3000, opts.maxTokens * 8)). Kept as a single constant for
-// now to minimise blast radius — promote to dynamic only if 7s is still
-// too tight for any specific endpoint.
-const NETWORK_TIMEOUT_MS = 7000;
+// Round 1.11.30 — extended 7000 → 10000 ms. With AI threadReplies + notifications
+// restored in generateWorldUpdate, payloads return to ~1200-1500 tokens which
+// at Gemini Flash ~250-300 tok/s takes ~4-6s. 10s gives comfortable margin
+// for rich payloads while still capping real outages (those surface in <1s).
+const NETWORK_TIMEOUT_MS = 10000;
 
 // Round 1.11.23 — module-level cooldown state for Gemini 429 rate-limit
 // handling. When a 429 lands, we parse the API's "Please retry in Xs" hint
@@ -44,17 +36,12 @@ const NETWORK_TIMEOUT_MS = 7000;
 // cleared automatically when Date.now() crosses the stamp.
 let geminiCooldownUntilMs = 0;
 
-// Round 1.11.24 — STAGGERED-START QUEUE for Gemini. The cooldown gate from
-// 1.11.23 was REACTIVE (kicks in after the first 429 returns). But the
-// failure mode in production was SIMULTANEOUS BURSTS — refreshFeed,
-// sendChatMessage, and fetchSuggestions all fired within ~100ms of each
-// other and 3 parallel requests reached the API before any of them
-// returned 429. Each call is BLOCKING on previous ONLY for the gap window
-// (default 500ms) — after that next call may start while previous is
-// still in flight. So 5 ops fired together → starts at t=0, 0.5, 1.0,
-// 1.5, 2.0s. Each generates ~5s so all overlap, but quota-wise they hit
-// the API in a smoother distribution that the per-minute window can absorb.
-const GEMINI_MIN_GAP_MS = 500;
+// Round 1.11.30 — staggered queue RELAXED from 500ms → 100ms. With paid-tier
+// 1000+ RPM, the 500ms gap was leaving ~95% of capacity unused. 100ms still
+// prevents accidental simultaneous bursts (e.g. multiple refresh handlers
+// firing in the same tick) but lets the game respond snappy. Cooldown gate
+// from 1.11.23 still catches any legitimate 429 if it ever happens.
+const GEMINI_MIN_GAP_MS = 100;
 let nextGeminiCallTimeMs = 0;
 
 // Round 1.11.24 — extra safety buffer added on top of API's "retry in Xs"
@@ -64,9 +51,8 @@ let nextGeminiCallTimeMs = 0;
 // "second-wave 51.5s cooldown" pattern in 1.11.23 logs).
 const GEMINI_COOLDOWN_BUFFER_MS = 3000;
 
-// Round 1.11.25 — one-time warn flag for the 2.5-flash → 2.0-flash override.
-// Without this, every single call would dump the explanation into LogBox.
-let gemini25OverrideWarned = false;
+// (Round 1.11.25 had a `gemini25OverrideWarned` flag for the hard 2.5→2.0
+// override — removed in 1.11.30 because paid tier eliminates the motivation.)
 
 async function callOpenAI(player: PlayerProfile, opts: LLMOptions) {
   const model = player.model.trim() || "gpt-4o-mini";
@@ -216,25 +202,12 @@ async function callGemini(player: PlayerProfile, opts: LLMOptions) {
     const secondsLeft = Math.ceil((geminiCooldownUntilMs - Date.now()) / 1000);
     throw new Error(`Gemini cooldown (${secondsLeft}s remaining)`);
   }
-  // Round 1.11.25 — HARD OVERRIDE of "gemini-2.5-flash" → "gemini-2.0-flash".
-  // The 2.5 preview has documented free-tier limit of 20 RPM (versus 2.0-flash's
-  // higher production-tier RPM) AND ignores `responseMimeType: application/json`
-  // intermittently, leaking "Here is the JSON:" prose. After 5 rounds of patches
-  // around its quirks (1.11.20-1.11.24), pragmatic decision: substitute at the
-  // call site. The player's stored model preference is NOT mutated — only the
-  // outgoing request — so if Google ever stabilises 2.5 the override can be
-  // lifted without re-editing player profiles. One-time per session warn.
-  const requestedModel = player.model.trim() || "gemini-2.0-flash";
-  const model =
-    requestedModel === "gemini-2.5-flash" ? "gemini-2.0-flash" : requestedModel;
-  if (model !== requestedModel && !gemini25OverrideWarned) {
-    gemini25OverrideWarned = true;
-    console.warn(
-      `[ai] Overriding requested model "${requestedModel}" → "${model}" ` +
-        `(2.5-flash preview hits 20-RPM free-tier limit and JSON-mode bugs; ` +
-        `2.0-flash production is more reliable for this game's call pattern).`,
-    );
-  }
+  // Round 1.11.30 — model override REMOVED. Paid-tier RPM (1000+ for 2.5-flash,
+  // 4000+ for 2.5-flash-lite) eliminates the original motivation for forcing
+  // 2.0-flash. Now we honour `player.model` verbatim; default to "gemini-2.0-flash"
+  // for unset (stable production tier, well-tested JSON-mode). User can pick
+  // 2.5-flash via settings if they want preview-tier quality / want to test it.
+  const model = player.model.trim() || "gemini-2.0-flash";
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
   let response;
@@ -1498,16 +1471,21 @@ Return STRICT JSON only, no commentary:
     { "characterId": "<id>", "delta": <decimal -3.0..3.0 with ONE decimal e.g. 1.2 or -0.7>, "reason": "<one-sentence reason referencing player's recent activity — also used as the rationale text in the post-event card>" }
   ],
   "posts": [
-    { "characterId": "<id>", "text": "<in-character 1-2 sentence feed post, optionally @mentioning the player>" }
+    {
+      "characterId": "<id>",
+      "text": "<in-character 1-2 sentence feed post, optionally @mentioning the player>",
+      "threadReplies": [
+        { "characterId": "<fan or celebrity id>", "text": "<short 1-sentence reaction>" }
+      ]
+    }
+  ],
+  "notifications": [
+    { "charactersInvolved": ["<id>", "<id>"], "headline": "<X, Y and Z replied to you on...>", "preview": "<short quote from one of them>" }
   ],
   "playerStatChanges": { "humor": <decimal -2.0..2.0 with ONE decimal e.g. 0.9>, "aura": <decimal -2.0..2.0 with ONE decimal e.g. 1.1> }
 }
 
-CRITICAL — what NOT to include (Round 1.11.25 architectural simplification):
-• DO NOT include "threadReplies" inside posts. The client generates thread comments locally from a scenario-aware fan bank. Just return the post text — no nested replies.
-• DO NOT include a "notifications" array. The client derives notifications client-side from "relationshipShifts". You don't write them.
-
-Generate 2-4 relationshipShifts and 6-9 posts (mix of cast celebrities at ~60% chance each + EXACTLY 4 fan accounts from the pool). KEEP TEXT FIELDS SHORT — every "text" string is a single sentence, ideally under 15 words; "reason" strings are one short clause. Token budget is tight, so be punchy not verbose. Be specific about WHY relationships moved. playerStatChanges represents how the day's vibe shifted the player's Humor/Aura standing — small decimal numbers (e.g. 0.8, -0.3), ONE decimal precision.`;
+Generate 2-4 relationshipShifts, 6-9 posts (mix of cast celebrities at ~60% chance each + EXACTLY 4 fan accounts from the pool), 1-2 notifications, and (for each post) 3-5 threadReplies from a mix of fans and other characters. Round 1.11.30 — paid tier active, payload budget is now generous; keep individual text fields tight but include the richer celeb-to-celeb interaction in threadReplies (this is where character chemistry shines). Be specific about WHY relationships moved. playerStatChanges represents how the day's vibe shifted the player's Humor/Aura standing — small decimal numbers (e.g. 0.8, -0.3), ONE decimal precision.`;
 
   const userMsg = `Recent player actions:\n${args.recentPlayerActions.slice(-8).join("\n") || "(nothing notable yet)"}`;
 
@@ -1515,13 +1493,13 @@ Generate 2-4 relationshipShifts and 6-9 posts (mix of cast celebrities at ~60% c
     const text = await runLLM(args.player, {
       system,
       messages: [{ role: "user", content: userMsg }],
-      // Round 1.11.25 — REDUCED from 2000 to 800. Architectural simplification
-      // removes threadReplies (~210-525 tokens) and notifications (~50-100
-      // tokens) from AI contract. New payload: summary (~15) + shifts (4×50)
-      // + posts (9×60) + playerStatChanges (~25) + JSON overhead (~150)
-      // ≈ 930 tokens worst case, typically 500-700. 800 cap is tight but
-      // comfortable; pairs with shorter gen time (~3s) and snappier UX.
-      maxTokens: 800,
+      // Round 1.11.30 — bumped 800 → 1500 with threadReplies + notifications
+      // restored in the contract. Worst-case payload now: summary (~15) +
+      // shifts (4×50) + posts (9 × ~60 + 9 × 4 × ~35 threadReplies) +
+      // notifications (2 × ~50) + playerStatChanges + JSON overhead ≈
+      // 1400 tokens. 1500 cap gives ~100-token margin. Pairs with 10s
+      // NETWORK_TIMEOUT_MS for the richer gen time (~4-6s).
+      maxTokens: 1500,
       temperature: 0.85,
       jsonResponse: true,
     });
@@ -1941,13 +1919,50 @@ export async function generateComposeSuggestions(args: {
   context: string;
   characters: Character[];
 }): Promise<string[]> {
-  // Round 1.11.26 — ALWAYS offline. Suggestions are low-stakes hint chips
-  // — the player rarely picks them verbatim. Spending free-tier quota
-  // on them was wasteful. Quality of static banks here is comparable to
-  // typical AI output for short suggestion text.
-  void args; // kept for signature stability; future re-enable trivial
-  if (args.kind === "event") return pickN(offlineEventSuggestions, 3);
-  return pickN(offlinePostSuggestions, 3);
+  // Round 1.11.30 — AI path restored. Paid tier capacity makes "save quota
+  // on hint chips" reasoning obsolete. AI generates personalised, context-
+  // aware suggestions referencing player's recent draft / event prompt /
+  // character chemistry; offline static bank kicks in as fallback when no
+  // API key, AI failure, or cooldown.
+  if (!args.player.apiKey.trim()) {
+    return args.kind === "event"
+      ? pickN(offlineEventSuggestions, 3)
+      : pickN(offlinePostSuggestions, 3);
+  }
+  const charNames = args.characters
+    .slice(0, 6)
+    .map((c) => `${c.name} (${c.handle})`)
+    .join(", ");
+  const system =
+    args.kind === "event"
+      ? `Suggest 3 short, distinct in-character actions the player could take in response to this event.
+Scenario: ${args.world.title}. Player: ${args.player.name} (${args.player.handle}).
+Return STRICT JSON: {"suggestions": ["<10-15 word action>", ...]}`
+      : `Suggest 3 short, sharp, on-brand posts the player could publish next.
+Scenario: ${args.world.title}. Player: ${args.player.name} (${args.player.handle}).
+Available characters they could @mention: ${charNames}.
+Return STRICT JSON: {"suggestions": ["<one tweet-style post>", ...]}`;
+
+  try {
+    const text = await runLLM(args.player, {
+      system,
+      messages: [{ role: "user", content: args.context || "(empty)" }],
+      maxTokens: 400,
+      temperature: 0.95,
+      jsonResponse: true,
+    });
+    const parsed = safeParseJSON(text);
+    const suggestions = (parsed?.suggestions as string[]) ?? [];
+    if (Array.isArray(suggestions) && suggestions.length > 0) {
+      return suggestions.slice(0, 4);
+    }
+  } catch {
+    /* fall through to offline */
+  }
+  // Offline fallback — same banks as no-key path, ensures we never return [].
+  return args.kind === "event"
+    ? pickN(offlineEventSuggestions, 3)
+    : pickN(offlinePostSuggestions, 3);
 }
 
 // ---------------- Activity outcome ----------------
