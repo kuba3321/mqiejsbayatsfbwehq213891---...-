@@ -1121,6 +1121,16 @@ export function GameProvider({ children }: PropsWithChildren) {
             event,
             choice: action,
             outlets: outletCharacters.map((o) => o.id),
+            // Round 1.11.12 — pass cast + contacts so AI can attribute
+            // immediate relationship shifts and offline fallback can
+            // synthesise them for the toast.
+            cast,
+            contacts: Object.fromEntries(
+              Object.entries(ref.contacts).map(([id, c]) => [
+                id,
+                { vibe: c.vibe, chemistryLabel: c.chemistryLabel },
+              ]),
+            ),
           });
           setState((s) => {
             const afterEnergyConsume = consumeEnergy(s).next;
@@ -1155,12 +1165,45 @@ export function GameProvider({ children }: PropsWithChildren) {
             // matches "+415" in the original Status post-event screenshot.
             const eventLikeBoost = Math.floor(2000 + Math.random() * 3000);
             const eventFollowerGain = rollFollowerGain(eventLikeBoost, next.player);
+
+            // Round 1.11.12 — apply per-character relationship shifts from the
+            // event result. This mirrors what applyPostReplies does for
+            // post-reply beats: each shift bumps the contact's vibe, updates
+            // their mood/feeling, and produces a relationshipChange entry for
+            // the toast (avatar + Δ% + CenteredBar at vibeAfter + rationale).
+            const eventShifts = result.relationshipShifts ?? [];
+            const contactsAfterEvent = { ...next.contacts };
+            const eventRelChanges: NonNullable<
+              GameState["lastToast"]
+            >["relationshipChanges"] = [];
+            for (const sh of eventShifts) {
+              const c = contactsAfterEvent[sh.characterId];
+              if (!c) continue;
+              const newVibe = Math.max(-100, Math.min(100, c.vibe + sh.delta));
+              const moodInfo = moodFor(newVibe);
+              contactsAfterEvent[sh.characterId] = {
+                ...c,
+                vibe: newVibe,
+                vibeDelta: sh.delta,
+                vibeReason: sh.reason,
+                currentFeeling: { headline: moodInfo.headline, detail: moodInfo.detail },
+                mood: { label: moodInfo.label, reason: moodInfo.detail, delta: sh.delta },
+              };
+              eventRelChanges.push({
+                characterId: sh.characterId,
+                delta: sh.delta,
+                rationale: sh.reason,
+                vibeAfter: newVibe,
+              });
+            }
+
             next = {
               ...next,
               player: {
                 ...next.player,
                 followers: next.player.followers + eventFollowerGain,
               },
+              contacts: contactsAfterEvent,
               mainGoalProgress: Math.min(100, next.mainGoalProgress + 16),
               posts: outcomePost ? [outcomePost, ...next.posts] : next.posts,
               eventOpen: false,
@@ -1197,9 +1240,10 @@ export function GameProvider({ children }: PropsWithChildren) {
                 // row stays clean rather than showing 0.0%.
                 humorDelta: result.humorDelta,
                 auraDelta: result.auraDelta,
-                // Events don't carry per-character relationship shifts in this
-                // contract — relationship beats come from refresh world-updates
-                // and post-replies. Keep relationshipChanges undefined.
+                // Round 1.11.12 — relationshipChanges populated from
+                // result.relationshipShifts (online AI or offline fallback).
+                // Same shape as applyPostReplies → consistent toast UI.
+                relationshipChanges: eventRelChanges.length > 0 ? eventRelChanges : undefined,
                 presenceDeltas: result.scoreChanges
                   .filter((c) => /humor|aura/i.test(c.label))
                   .slice(0, 2)
@@ -1207,7 +1251,11 @@ export function GameProvider({ children }: PropsWithChildren) {
                     key: /humor/i.test(c.label) ? ("humor" as const) : ("aura" as const),
                     direction: c.positive ? ("up" as const) : ("down" as const),
                   })),
-                relationshipDeltas: [],
+                // Legacy compact array for any code path that still reads it.
+                relationshipDeltas: eventShifts.map((sh) => ({
+                  characterId: sh.characterId,
+                  direction: sh.delta >= 0 ? ("up" as const) : ("down" as const),
+                })),
               },
             };
             return withXP(next, xpReward);

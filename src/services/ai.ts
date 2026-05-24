@@ -480,6 +480,16 @@ export type EventResult = {
   // Round 1.11 — decimal -2..2 player-stat shifts. Render with .toFixed(1).
   humorDelta?: number;
   auraDelta?: number;
+  // Round 1.11.12 — IMMEDIATE per-character relationship deltas this beat.
+  // Without this, the event toast had no relationship chips and the player
+  // only learned of the impact by digging into Messages tab. delta is a
+  // decimal percentage shift (-3.0..3.0 with one decimal), reason is the
+  // human-readable rationale ("Speed felt seen by your loud move").
+  relationshipShifts?: Array<{
+    characterId: string;
+    delta: number;
+    reason: string;
+  }>;
   postText?: string;
   postAuthorId?: string;
   advanceDay: boolean;
@@ -570,16 +580,33 @@ export async function resolveEventChoice(args: {
   event: EventOutcome;
   choice: string;
   outlets: string[];
+  // Round 1.11.12 — player's cast so we can ask the AI to attribute
+  // immediate relationship shifts to specific characters and so the offline
+  // fallback can synthesise shifts for ~2-3 random cast members.
+  cast: Character[];
+  contacts: Record<string, { vibe: number; chemistryLabel: string }>;
 }): Promise<EventResult> {
   if (!args.player.apiKey.trim()) {
     return offlineEventResolution(args);
   }
+
+  const castList = args.cast
+    .map((c) => {
+      const ch = args.contacts[c.id];
+      const chemHint = ch ? ` [vibe ${Math.round(ch.vibe)}%, label "${ch.chemistryLabel}"]` : "";
+      return `${c.id}: ${c.name} (${c.handle})${chemHint}`;
+    })
+    .join("\n");
 
   const system = `You are the outcome writer for a social-media celebrity simulator.
 Scenario: ${args.world.title}. ${args.world.setting ?? args.world.description}.
 Player: ${args.player.name} (${args.player.handle}).
 Event: ${args.event.eventTitle} — ${args.event.eventBody}
 Player picked: "${args.choice}".
+
+CAST present in the player's world (use these exact ids in relationshipShifts):
+${castList || "(no cast added yet)"}
+
 If NPCs appear in the outcome, tune them by their chemistry label with the player (rivals = passive-aggressive, lovers = warm with stakes, enemies = openly cold, etc.).
 Write the consequence in punchy tabloid prose. Return STRICT JSON only:
 {
@@ -590,6 +617,9 @@ Write the consequence in punchy tabloid prose. Return STRICT JSON only:
   ],
   "humorDelta": <decimal -2.0..2.0 representing how this beat shifted the player's Humor stat. Use ONE decimal (e.g. 1.1, -0.4). 0 if no change.>,
   "auraDelta": <decimal -2.0..2.0 representing how this beat shifted the player's Aura stat. Use ONE decimal (e.g. 0.9, -1.2). 0 if no change.>,
+  "relationshipShifts": [
+    { "characterId": "<one of the cast ids above>", "delta": <decimal -3.0..3.0 with ONE decimal e.g. 0.9 or -1.2>, "reason": "<one short sentence rationale referencing this beat — e.g. 'Speed felt seen by your loud move.'>" }
+  ],
   "postText": "<single feed post from a media outlet character reporting the event in 1-2 sentences>",
   "postAuthorId": "${args.outlets.join(" | ")}"
 }`;
@@ -604,12 +634,28 @@ Write the consequence in punchy tabloid prose. Return STRICT JSON only:
     });
     const parsed = safeParseJSON(text);
     if (parsed && typeof parsed.outcomeText === "string") {
+      // Round 1.11.12 — sanitize relationshipShifts. AI sometimes hallucinates
+      // character IDs not in the cast; we drop those so the UI can resolve
+      // every shift's avatar. Also enforce numeric delta and string reason.
+      const rawShifts = Array.isArray(parsed.relationshipShifts)
+        ? (parsed.relationshipShifts as Array<{ characterId?: string; delta?: number; reason?: string }>)
+        : [];
+      const castIdSet = new Set(args.cast.map((c) => c.id));
+      const relationshipShifts = rawShifts
+        .filter((s) => typeof s.characterId === "string" && castIdSet.has(s.characterId))
+        .map((s) => ({
+          characterId: s.characterId as string,
+          delta: typeof s.delta === "number" ? s.delta : 0,
+          reason: typeof s.reason === "string" ? s.reason : "",
+        }))
+        .slice(0, 5);
       return {
         outcomeText: parsed.outcomeText as string,
         summary: typeof parsed.summary === "string" ? (parsed.summary as string) : undefined,
         scoreChanges: ((parsed.scoreChanges as ScoreChange[]) ?? []).slice(0, 4),
         humorDelta: typeof parsed.humorDelta === "number" ? (parsed.humorDelta as number) : undefined,
         auraDelta: typeof parsed.auraDelta === "number" ? (parsed.auraDelta as number) : undefined,
+        relationshipShifts: relationshipShifts.length > 0 ? relationshipShifts : undefined,
         postText: (parsed.postText as string) || undefined,
         postAuthorId:
           (parsed.postAuthorId as string) || args.outlets[0] || "pop-craze",
@@ -678,10 +724,25 @@ const offlineSummaryTemplates = [
   `Plot pivot: "[CHOICE]" rewires the week.`,
 ];
 
+// Round 1.11.12 — pool of offline rationale lines for event-driven relationship
+// shifts. Used when no AI key is configured (or AI fails) so the toast still
+// gets meaningful per-character rationale text under each shift.
+const offlineRelationshipReasons = [
+  "Felt seen by your loud move.",
+  "Didn't love the angle, but respected the nerve.",
+  "Quietly recalibrated after watching that play.",
+  "Caught the subtext and approved.",
+  "Took it personally — not in a good way.",
+  "Mentioned it on a back-channel; was impressed.",
+  "Felt the spotlight steal and clapped anyway.",
+  "Saved a screenshot. Reasons unknown.",
+];
+
 function offlineEventResolution(args: {
   player: PlayerProfile;
   choice: string;
   outlets: string[];
+  cast?: Character[];
 }): EventResult {
   const template = offlineHeadlineTemplates[
     Math.floor(Math.random() * offlineHeadlineTemplates.length)
@@ -706,12 +767,36 @@ function offlineEventResolution(args: {
   // Decimal humor/aura deltas (Round 1.11 — scale -2..2 with one decimal).
   const humorDelta = Math.round((Math.random() * 3 - 1) * 10) / 10; // -1.0..2.0 leaning positive
   const auraDelta = Math.round((Math.random() * 3 - 1) * 10) / 10;
+  // Round 1.11.12 — synthesise 2-3 immediate relationship shifts so the
+  // event toast can render the same mini-avatar grid the post-replies toast
+  // does. Pick random cast members (positive bias, occasional negative).
+  let relationshipShifts: EventResult["relationshipShifts"];
+  if (args.cast && args.cast.length > 0) {
+    const shuffleCast = [...args.cast].sort(() => Math.random() - 0.5);
+    const count = Math.min(2 + Math.floor(Math.random() * 2), shuffleCast.length); // 2-3
+    relationshipShifts = shuffleCast.slice(0, count).map((c, i) => {
+      // Mostly positive (2/3 chance), occasional negative for drama.
+      const positive = Math.random() < 0.66;
+      const magnitude = Math.round((0.3 + Math.random() * 2.0) * 10) / 10; // 0.3..2.3
+      const delta = positive ? magnitude : -magnitude;
+      return {
+        characterId: c.id,
+        delta,
+        reason:
+          offlineRelationshipReasons[
+            (i + Math.floor(Math.random() * offlineRelationshipReasons.length))
+              % offlineRelationshipReasons.length
+          ],
+      };
+    });
+  }
   return {
     outcomeText,
     summary,
     scoreChanges,
     humorDelta,
     auraDelta,
+    relationshipShifts,
     postText,
     postAuthorId: args.outlets[Math.floor(Math.random() * args.outlets.length)] ?? "pop-craze",
     advanceDay: true,
@@ -745,6 +830,10 @@ export type WorldUpdate = {
 
 // Offline fallback content banks. Rich, varied, used only when a pending action triggered the refresh
 // (the queue gates this — idle refresh stays silent thanks to game-context's empty-queue guard).
+// Round 1.11.12 — `offlinePostTemplates` is the DEFAULT bank, used when there's no scenario-specific
+// override (e.g. accidentally-famous celebrity world). Scenario-keyed banks below (regency-feed,
+// academy-chaos) keep each character's voice but pivot the topic — Sabrina still gushes the same way
+// she does about espresso, but about ton gossip or potion glitches instead.
 const offlinePostTemplates: Record<string, string[]> = {
   sabrina: [
     "espresso for breakfast. espresso for dinner. balanced diet babes",
@@ -815,6 +904,165 @@ const offlinePostTemplates: Record<string, string[]> = {
     "the city sounds different when nobody's watching you",
     "wrote something tonight that i won't explain",
     "tour planning is a sport for ghosts",
+  ],
+};
+
+// Round 1.11.12 — scenario-specific offline post banks. Keyed by world id.
+// Each character retains their voice but the topic shifts to fit the scenario.
+// When the active world doesn't have an entry, the default `offlinePostTemplates`
+// bank is used (which is celebrity-flavored — perfect for accidentally-famous).
+//
+// Adding a new scenario: drop another `<world-id>: { <character-id>: [lines] }`
+// entry. Characters without an override fall back through to the default bank.
+const scenarioPostTemplates: Record<string, Record<string, string[]>> = {
+  // Bridgerton-style Regency social season — gowns, gossip, ton scandal sheets.
+  "regency-feed": {
+    sabrina: [
+      "diamond of the season behavior. just naturally.",
+      "the ton thinks they know. the ton has no idea.",
+      "lacing my own corset because some things i don't trust the staff with",
+      "two suitors at one ball is a rookie number. i had three. and a draft of a third.",
+      "the gossip sheet ran my name in cursive again. flattering, mostly.",
+    ],
+    speed: [
+      "WHO LEAKED MY DANCE CARD TO LADY WHISTLEDOWN!!!! I WILL FIND YOU",
+      "MY HORSE WON THE STEEPLECHASE AGAIN!!!! TELL THE STABLES!!",
+      "ARRIVED LATE TO THE BALL ON PURPOSE — IT'S A FEATURE NOT A BUG",
+      "BROOOO THE QUEEN LOOKED AT ME!!! THE QUEEN!!! I AM SHAKING",
+    ],
+    billie: [
+      "another ball. another reason to lurk near the windows.",
+      "the gossip sheet pretends not to see me. i appreciate the discretion.",
+      "tea is cold. mood is colder. company is acceptable.",
+      "ten reasons i'm avoiding the drawing room tonight. all of them are valid.",
+    ],
+    drake: [
+      "the view from the box seats is exactly what they said it would be.",
+      "ownership is just patience plus connections. ask any duke.",
+      "they study the seating chart. they miss the alliance every time.",
+      "if the season has a king, his cravat is impeccable. confirmed by mirror.",
+    ],
+    taylor: [
+      "every season has its diamond. this one's about to have its bridge.",
+      "wrote a letter today. did not send it. that's also a kind of art.",
+      "girls in the parlour. cats in the parlour. you do the embroidery math.",
+      "thirteen waltzes still hits. ask any debutante.",
+    ],
+    kanye: [
+      "ARCHITECTURE OF THIS HALL IS A FREQUENCY. TURN IT UP.",
+      "Tailoring. Composition. Light. All one thing this season.",
+      "I designed the trim myself. The seamstress is taking notes.",
+      "THEY WILL CALL IT A REPUTATION. I CALL IT A LEGACY.",
+    ],
+    beyonce: [
+      "Quiet seasons build loud reputations.",
+      "Parlour. Family. Parlour. In that order.",
+      "The match-maker knows. That's enough.",
+      "Mm. Noted, m'lord.",
+    ],
+    tyler: [
+      "if it doesn't have three shades of velvet and one secret it's not a ball",
+      "running my own conservatory out here. self-curated.",
+      "the trim on this coat is a state of mind. lavender is a strategy.",
+    ],
+    ariana: [
+      "yk i was gonna stay in the drawing room today but here we are",
+      "lol who said you could waltz like that on a tuesday",
+      "the harpsichord was crying by the third movement honestly",
+    ],
+    "the-weeknd": [
+      "carriage. 4am. the city is unrecognisable at this hour",
+      "after-supper behavior, again",
+      "the candles burn different when no one is watching",
+    ],
+  },
+  // Magic-school chaos — enchanted parchment, house cup, midnight library raids.
+  "academy-chaos": {
+    sabrina: [
+      "potion brewing as a personality trait. it's working.",
+      "enchanted my mirror to gossip back. five-star upgrade.",
+      "the house cup math is mathing this week ✨🪄",
+      "lowkey planning a midnight feast at 2am and i refuse to nap",
+      "if you don't reply to one (1) enchanted parchment are u even friends",
+    ],
+    speed: [
+      "BROOO I JUST CAST A SPELL AND THE WHOLE COMMON ROOM WOKE UP!!!",
+      "GET ME ON A BROOMSTICK RIGHT NOW IM GOING TO THE TOWER!!!!",
+      "STREAMING THE HOUSE CUP LIVE FROM THE STANDS, CHAT IT'S CINEMA",
+      "OK BUT WHY IS EVERYONE SLEEPING IN HERBOLOGY WAKE UP",
+    ],
+    billie: [
+      "okay haha. spell backfired. cool cool cool.",
+      "i'm not saying anything. i'm just hexing the receipts.",
+      "watched the same scrying mirror twice today. it's research",
+      "left my wand in the library for six hours and i felt nothing",
+    ],
+    drake: [
+      "took the long way through the corridors. felt right.",
+      "they study the wand work. they miss the incantation every time.",
+      "OVO common room about to drop something nobody's ready for",
+      "wrote three charms about one detention. that's a record",
+    ],
+    taylor: [
+      "every term has a version of this exact tuesday",
+      "wrote a charm today. it knows things i don't.",
+      "girls in the library. cats in the library. you do the wand math.",
+      "if you find me at a back booth in the great hall, no you didn't",
+    ],
+    kanye: [
+      "THIS IS A FREQUENCY. CAST IT LOUDER.",
+      "Spellwork. Symbology. Color. All one art.",
+      "Don't ask me to explain the rune. The work is the answer.",
+      "I dreamed in titanium runes last night. The grimoire knows.",
+    ],
+    beyonce: [
+      "Quiet terms build loud final exams.",
+      "Library. Family. Library. In that order.",
+      "The headmistress knows. That's enough.",
+    ],
+    tyler: [
+      "if it doesn't have three colors and one cursed object it's not a project",
+      "running my own herbology greenhouse out here. self-curated.",
+      "yellow potions are a state of mind. orange is a strategy.",
+    ],
+    ariana: [
+      "yk i was gonna stay quiet in charms today but here we are",
+      "lol who said you could levitate like that on a tuesday",
+      "the wand was crying by the third incantation honestly",
+    ],
+    "the-weeknd": [
+      "astronomy tower. 4am. nothing else exists right now",
+      "after-curfew behavior, again",
+      "the castle sounds different when nobody's watching you",
+    ],
+  },
+};
+
+// Scenario-specific fan posts — fans react to the world they're in. When the
+// active world has no entry, the default `offlineFanPostBank` is used.
+const scenarioFanPostBanks: Record<string, string[]> = {
+  "regency-feed": [
+    "if i see one more whistledown drop at 6am i'm composing a strongly-worded letter",
+    "the bonnet discourse on this scandal sheet is unhinged today",
+    "guys is anyone else dissecting the bridgerton ball seating chart or just me",
+    "watched the same duel twice today. it's research. for science.",
+    "PSA: if you screenshot my letters and post them out of context i WILL find you",
+    "ok i need everyone to stop dueling on a tuesday i have embroidery",
+    "this is what i'm telling my grandkids the ton looked like in 1813",
+    "imagine being normal. imagine logging off. (i can't either)",
+    "the rate at which the ton can pivot from waltz to scandal is unmatched",
+    "this scandal sheet is just everyone yelling into a parlour and the parlour yells back",
+  ],
+  "academy-chaos": [
+    "guys is anyone else watching this whole house cup situation or just me at 3am",
+    "my enchanted parchment is feral today and i'm here for it",
+    "ok i need everyone to stop casting bangers in herbology i have potions in the morning",
+    "this is what i'm telling my kids the magical-industrial complex looked like in 7th year",
+    "watching the duel unfold like it's a quidditch match. popcorn-emoji-popcorn-emoji",
+    "PSA: if you screenshot my hexes and post them out of context i WILL find you",
+    "i'm just a witch. with three (3) group hexes actively dissecting tonight's spells",
+    "imagine being a muggle. imagine logging off. (i can't either)",
+    "saw a charm so good i had to put my wand down for ten minutes to recover",
   ],
 };
 
@@ -892,9 +1140,12 @@ function buildOfflineThreadReplies(fans: string[]): Array<{ characterId: string;
 // and as the padding source in the online path when AI doesn't return enough
 // fans). Tries to skip duplicate authors / lines via the passed Sets. Each fan
 // post gets 2-5 threadReplies (smaller than celeb's 5-12 because reach is lower).
+// Round 1.11.12 — accepts an optional `lineBank` so scenario-specific fan
+// voices can be threaded through (academy chaos, regency feed, etc).
 function buildOneFanPost(
   usedAuthors: Set<string>,
   usedLines: Set<string>,
+  lineBank: string[] = offlineFanPostBank,
 ): { characterId: string; text: string; threadReplies: Array<{ characterId: string; text: string }> } {
   const fanIds = anonymousFanIds;
   let author = pickRandom(fanIds);
@@ -903,10 +1154,10 @@ function buildOneFanPost(
     author = pickRandom(fanIds);
     attempts++;
   }
-  let text = pickRandom(offlineFanPostBank);
+  let text = pickRandom(lineBank);
   attempts = 0;
   while (usedLines.has(text) && attempts < 10) {
-    text = pickRandom(offlineFanPostBank);
+    text = pickRandom(lineBank);
     attempts++;
   }
   usedAuthors.add(author);
@@ -935,29 +1186,48 @@ function buildOneFanPost(
 //   * Net density target: 7-9 posts per day.
 function buildOfflineWorldUpdate(args: {
   characters: Character[];
+  world?: World;
 }): WorldUpdate {
   const fanIds = anonymousFanIds;
+  // Round 1.11.12 — scenario-aware offline templates. Pick per-character
+  // lines from the scenario-specific bank if the active world has one; fall
+  // back through default per-character bank; final fallback to a generic
+  // first-name template so a custom-character with no entries still gets a
+  // playable line. Sabrina in Bridgerton talks gowns, in Magic School talks
+  // potions, in Accidentally Famous talks espresso — same voice, scenario-
+  // appropriate topic.
+  const scenarioBank = args.world ? scenarioPostTemplates[args.world.id] : undefined;
+  const pickLineFor = (c: Character): string => {
+    const scenarioLines = scenarioBank?.[c.id];
+    if (scenarioLines && scenarioLines.length > 0) return pickRandom(scenarioLines);
+    const defaultLines = offlinePostTemplates[c.id];
+    if (defaultLines && defaultLines.length > 0) return pickRandom(defaultLines);
+    return pickRandom([
+      `${c.name.split(" ")[0]} drops something cryptic and walks away.`,
+      `${c.name.split(" ")[0]} types, deletes, then types again. you can feel the energy.`,
+    ]);
+  };
+  // Fan posts also pull from a scenario-specific bank when one exists, with
+  // fallback to the generic everyday-user bank.
+  const fanScenarioBank = args.world ? scenarioFanPostBanks[args.world.id] : undefined;
+  const fanLineBank = fanScenarioBank ?? offlineFanPostBank;
   // 1. Celebs — each gets a 60% chance to post. NO upper limit (lets the
   //    whole cast appear when the dice favor them).
   const celebPosts = args.characters
     .filter(() => Math.random() < 0.6)
     .map((c) => ({
       characterId: c.id,
-      text: pickRandom(
-        offlinePostTemplates[c.id] ?? [
-          `${c.name.split(" ")[0]} drops something cryptic and walks away.`,
-          `${c.name.split(" ")[0]} types, deletes, then types again. you can feel the energy.`,
-        ],
-      ),
+      text: pickLineFor(c),
       threadReplies: buildOfflineThreadReplies(fanIds),
     }));
   // 2. Fans — ALWAYS exactly 4 unique fan posts (per user requirement
-  //    "bezwarunkowo i bezwyjątkowo"). Dedup by author and text.
+  //    "bezwarunkowo i bezwyjątkowo"). Dedup by author and text. Pulls
+  //    from scenario-specific fan bank when available.
   const usedFanAuthors = new Set<string>();
   const usedFanLines = new Set<string>();
   const fanPosts: WorldUpdate["posts"] = [];
   for (let i = 0; i < 4; i++) {
-    fanPosts.push(buildOneFanPost(usedFanAuthors, usedFanLines));
+    fanPosts.push(buildOneFanPost(usedFanAuthors, usedFanLines, fanLineBank));
   }
   // 3. Shuffle the combined list — interleaves celeb and fan posts naturally
   //    instead of stacking them in two blocks.
