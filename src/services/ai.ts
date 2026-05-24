@@ -206,11 +206,13 @@ async function callGemini(player: PlayerProfile, opts: LLMOptions) {
   }
 
   const payload = await response.json();
-  // Gemini occasionally returns a finishReason of SAFETY or MAX_TOKENS with no
-  // text content. Log so we don't silently swallow it as "empty JSON".
+  // Round 1.11.22 — diagnostic instrumentation. Log finishReason for ANY
+  // non-STOP case (including MAX_TOKENS) so we can tell from logs whether
+  // a parse-fail downstream was due to truncation vs malformed JSON vs
+  // SAFETY block. Previously MAX_TOKENS was silent.
   const finishReason = payload?.candidates?.[0]?.finishReason as string | undefined;
-  if (finishReason && finishReason !== "STOP" && finishReason !== "MAX_TOKENS") {
-    console.warn(`[ai] Gemini finishReason=${finishReason}`);
+  if (finishReason && finishReason !== "STOP") {
+    console.warn(`[ai] Gemini finishReason=${finishReason} (non-STOP — possible truncation/block)`);
   }
   return (
     payload?.candidates?.[0]?.content?.parts
@@ -1397,7 +1399,7 @@ Return STRICT JSON only, no commentary:
   ],
   "playerStatChanges": { "humor": <decimal -2.0..2.0 with ONE decimal e.g. 0.9>, "aura": <decimal -2.0..2.0 with ONE decimal e.g. 1.1> }
 }
-Generate 2-4 relationshipShifts, 2-3 posts, 1-2 notifications, and (for each post) 5-12 threadReplies from a mix of fans and other characters. Be specific about WHY relationships moved. playerStatChanges represents how the day's vibe shifted the player's Humor/Aura standing — small decimal numbers (e.g. 0.8, -0.3), ONE decimal precision.`;
+Generate 2-4 relationshipShifts, 2-3 posts, 1-2 notifications, and (for each post) 3-5 SHORT threadReplies from a mix of fans and other characters. KEEP TEXT FIELDS SHORT — every "text" string is a single sentence, ideally under 15 words; "reason" strings are one short clause. Token budget is tight, so be punchy not verbose. Be specific about WHY relationships moved. playerStatChanges represents how the day's vibe shifted the player's Humor/Aura standing — small decimal numbers (e.g. 0.8, -0.3), ONE decimal precision.`;
 
   const userMsg = `Recent player actions:\n${args.recentPlayerActions.slice(-8).join("\n") || "(nothing notable yet)"}`;
 
@@ -1405,11 +1407,12 @@ Generate 2-4 relationshipShifts, 2-3 posts, 1-2 notifications, and (for each pos
     const text = await runLLM(args.player, {
       system,
       messages: [{ role: "user", content: userMsg }],
-      // Round 1.11.21 — bumped from 900 to 1200 to absorb worst-case dense
-      // payloads (2-3 posts × 5-12 threadReplies + 4 fan posts each with
-      // their own threadReplies + 2-4 relationshipShifts + notifications).
-      // 900 was cutting tail entries mid-string ("characterId": "tyler", "text...").
-      maxTokens: 1200,
+      // Round 1.11.22 — bumped 1200 → 1500. Even 1200 was truncating at
+      // worst-case payload (3 posts × 12 threadReplies × ~35 tokens each ≈
+      // 1260 just for threadReplies). Combined with prompt-side reduction
+      // of threadReplies from 5-12 → 3-5 below, typical output now lands
+      // ~700-1100 tokens with a comfortable buffer to 1500.
+      maxTokens: 1500,
       temperature: 0.85,
       jsonResponse: true,
     });
@@ -1453,9 +1456,15 @@ Generate 2-4 relationshipShifts, 2-3 posts, 1-2 notifications, and (for each pos
         playerStatChanges: parsed.playerStatChanges as WorldUpdate["playerStatChanges"],
       };
     }
+    // Round 1.11.22 — enhanced diagnostics. Old log showed only `text.slice(0, 200)`
+    // which was useless for diagnosing truncation (always shows the same head
+    // bytes). Now we report total length AND the tail — if the JSON cuts
+    // mid-string, tail reveals where; if it ended cleanly, tail shows `}`.
     console.warn(
-      "[ai] generateWorldUpdate: JSON parse returned null. Falling back to offline content. Raw head:",
+      `[ai] generateWorldUpdate: JSON parse failed (len=${text.length}). Falling back to offline. Head:`,
       text.slice(0, 200),
+      "| Tail:",
+      text.slice(-200),
     );
   } catch (err) {
     // Network 503 / 429 / 401, fetch timeout, etc. All recoverable — the
@@ -1762,9 +1771,13 @@ playerStatChanges represents how this post lands for the player's Humor / Aura s
         playerStatChanges: parsed.playerStatChanges as PostRepliesResult["playerStatChanges"],
       };
     }
+    // Round 1.11.22 — enhanced diagnostics (length + tail) to distinguish
+    // truncation vs malformed JSON vs SAFETY block downstream.
     console.warn(
-      "[ai] generatePostReplies: JSON parse returned null. Falling back to offline content. Raw head:",
+      `[ai] generatePostReplies: JSON parse failed (len=${text.length}). Falling back to offline. Head:`,
       text.slice(0, 200),
+      "| Tail:",
+      text.slice(-200),
     );
   } catch (err) {
     // Outage-proof: 503 / 429 / timeout / 401 / parse fail all route here.
