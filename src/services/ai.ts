@@ -64,6 +64,10 @@ let nextGeminiCallTimeMs = 0;
 // "second-wave 51.5s cooldown" pattern in 1.11.23 logs).
 const GEMINI_COOLDOWN_BUFFER_MS = 3000;
 
+// Round 1.11.25 — one-time warn flag for the 2.5-flash → 2.0-flash override.
+// Without this, every single call would dump the explanation into LogBox.
+let gemini25OverrideWarned = false;
+
 async function callOpenAI(player: PlayerProfile, opts: LLMOptions) {
   const model = player.model.trim() || "gpt-4o-mini";
   const body: Record<string, unknown> = {
@@ -212,13 +216,25 @@ async function callGemini(player: PlayerProfile, opts: LLMOptions) {
     const secondsLeft = Math.ceil((geminiCooldownUntilMs - Date.now()) / 1000);
     throw new Error(`Gemini cooldown (${secondsLeft}s remaining)`);
   }
-  // Round 1.11.20 — default switched from "gemini-2.5-flash" (preview) to
-  // "gemini-2.0-flash" (production-stable). The 2.5 preview occasionally
-  // ignores `responseMimeType: "application/json"` and replies with a
-  // chat-style preamble ("Here is the JSON requested:\n```json\n..."),
-  // which leaks through safeParseJSON. 2.0-flash respects structured-output
-  // contract reliably. Player can still override via PlayerProfile.model.
-  const model = player.model.trim() || "gemini-2.0-flash";
+  // Round 1.11.25 — HARD OVERRIDE of "gemini-2.5-flash" → "gemini-2.0-flash".
+  // The 2.5 preview has documented free-tier limit of 20 RPM (versus 2.0-flash's
+  // higher production-tier RPM) AND ignores `responseMimeType: application/json`
+  // intermittently, leaking "Here is the JSON:" prose. After 5 rounds of patches
+  // around its quirks (1.11.20-1.11.24), pragmatic decision: substitute at the
+  // call site. The player's stored model preference is NOT mutated — only the
+  // outgoing request — so if Google ever stabilises 2.5 the override can be
+  // lifted without re-editing player profiles. One-time per session warn.
+  const requestedModel = player.model.trim() || "gemini-2.0-flash";
+  const model =
+    requestedModel === "gemini-2.5-flash" ? "gemini-2.0-flash" : requestedModel;
+  if (model !== requestedModel && !gemini25OverrideWarned) {
+    gemini25OverrideWarned = true;
+    console.warn(
+      `[ai] Overriding requested model "${requestedModel}" → "${model}" ` +
+        `(2.5-flash preview hits 20-RPM free-tier limit and JSON-mode bugs; ` +
+        `2.0-flash production is more reliable for this game's call pattern).`,
+    );
+  }
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
   let response;
@@ -1249,6 +1265,20 @@ function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+// Round 1.11.25 — public helper that lets game-context.tsx generate
+// scenario-aware thread replies for AI-returned posts (which no longer
+// carry threadReplies in their contract). Picks the right comment bank
+// by world id with default fallback to the generic everyday-user bank.
+export function buildScenarioThreadReplies(
+  worldId: string,
+  count?: number,
+): Array<{ characterId: string; text: string }> {
+  const fanIds = anonymousFanIds;
+  const commentBank = scenarioFanCommentBank[worldId] ?? offlineFanComments;
+  const full = buildOfflineThreadReplies(fanIds, commentBank);
+  return count !== undefined ? full.slice(0, count) : full;
+}
+
 // Round 1.11.15 — accepts an optional `commentBank` for scenario-aware
 // comment voice (Bridgerton fans don't write about espresso). Falls back
 // to the generic offlineFanComments when no scenario override is passed.
@@ -1468,20 +1498,16 @@ Return STRICT JSON only, no commentary:
     { "characterId": "<id>", "delta": <decimal -3.0..3.0 with ONE decimal e.g. 1.2 or -0.7>, "reason": "<one-sentence reason referencing player's recent activity — also used as the rationale text in the post-event card>" }
   ],
   "posts": [
-    {
-      "characterId": "<id>",
-      "text": "<in-character 1-2 sentence feed post, optionally @mentioning the player>",
-      "threadReplies": [
-        { "characterId": "<fan or celebrity id>", "text": "<short 1-sentence reaction>" }
-      ]
-    }
-  ],
-  "notifications": [
-    { "charactersInvolved": ["<id>", "<id>"], "headline": "<X, Y and Z replied to you on...>", "preview": "<short quote from one of them>" }
+    { "characterId": "<id>", "text": "<in-character 1-2 sentence feed post, optionally @mentioning the player>" }
   ],
   "playerStatChanges": { "humor": <decimal -2.0..2.0 with ONE decimal e.g. 0.9>, "aura": <decimal -2.0..2.0 with ONE decimal e.g. 1.1> }
 }
-Generate 2-4 relationshipShifts, 2-3 posts, 1-2 notifications, and (for each post) 3-5 SHORT threadReplies from a mix of fans and other characters. KEEP TEXT FIELDS SHORT — every "text" string is a single sentence, ideally under 15 words; "reason" strings are one short clause. Token budget is tight, so be punchy not verbose. Be specific about WHY relationships moved. playerStatChanges represents how the day's vibe shifted the player's Humor/Aura standing — small decimal numbers (e.g. 0.8, -0.3), ONE decimal precision.`;
+
+CRITICAL — what NOT to include (Round 1.11.25 architectural simplification):
+• DO NOT include "threadReplies" inside posts. The client generates thread comments locally from a scenario-aware fan bank. Just return the post text — no nested replies.
+• DO NOT include a "notifications" array. The client derives notifications client-side from "relationshipShifts". You don't write them.
+
+Generate 2-4 relationshipShifts and 6-9 posts (mix of cast celebrities at ~60% chance each + EXACTLY 4 fan accounts from the pool). KEEP TEXT FIELDS SHORT — every "text" string is a single sentence, ideally under 15 words; "reason" strings are one short clause. Token budget is tight, so be punchy not verbose. Be specific about WHY relationships moved. playerStatChanges represents how the day's vibe shifted the player's Humor/Aura standing — small decimal numbers (e.g. 0.8, -0.3), ONE decimal precision.`;
 
   const userMsg = `Recent player actions:\n${args.recentPlayerActions.slice(-8).join("\n") || "(nothing notable yet)"}`;
 
@@ -1489,12 +1515,13 @@ Generate 2-4 relationshipShifts, 2-3 posts, 1-2 notifications, and (for each pos
     const text = await runLLM(args.player, {
       system,
       messages: [{ role: "user", content: userMsg }],
-      // Round 1.11.23 — bumped 1500 → 2000. Diagnostic logs from 1.11.22
-      // showed 2.5-flash hitting MAX_TOKENS at 1500 even with the prompt-side
-      // reduction. The preview model is more verbose than 2.0-flash and may
-      // not strictly honor maxOutputTokens config. 2000 gives bigger margin;
-      // still fits in 7s NETWORK_TIMEOUT (Gemini Flash ~300 tok/s).
-      maxTokens: 2000,
+      // Round 1.11.25 — REDUCED from 2000 to 800. Architectural simplification
+      // removes threadReplies (~210-525 tokens) and notifications (~50-100
+      // tokens) from AI contract. New payload: summary (~15) + shifts (4×50)
+      // + posts (9×60) + playerStatChanges (~25) + JSON overhead (~150)
+      // ≈ 930 tokens worst case, typically 500-700. 800 cap is tight but
+      // comfortable; pairs with shorter gen time (~3s) and snappier UX.
+      maxTokens: 800,
       temperature: 0.85,
       jsonResponse: true,
     });

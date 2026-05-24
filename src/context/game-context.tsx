@@ -52,6 +52,7 @@ import {
   generateScenario,
   generateWorldUpdate,
   buildOfflineWorldUpdate,
+  buildScenarioThreadReplies,
   requestCelebrityReply,
   resolveEventChoice,
 } from "@/services/ai";
@@ -1877,7 +1878,19 @@ function applyWorldUpdate(
       postAuthorSrc && "followers" in postAuthorSrc && typeof postAuthorSrc.followers === "number"
         ? postAuthorSrc.followers
         : 0;
-    const threadReplies = (p.threadReplies ?? []).map((r, i) => {
+    // Round 1.11.25 — threadReplies are now generated CLIENT-SIDE for AI
+    // posts. The AI contract no longer includes them (saves ~210-525 tokens
+    // per call, eliminates MAX_TOKENS truncation pattern). buildOffline
+    // world-update path still pre-fills threadReplies inline, so we honor
+    // them if present; only synthesize when AI returned a bare post.
+    const rawReplies =
+      p.threadReplies && p.threadReplies.length > 0
+        ? p.threadReplies
+        : buildScenarioThreadReplies(
+            s.selectedWorldId,
+            3 + Math.floor(Math.random() * 3), // 3-5 scenario-aware fan replies
+          );
+    const threadReplies = rawReplies.map((r, i) => {
       const rSrc = findAnyCharacter(r.characterId);
       const rFollowers =
         rSrc && "followers" in rSrc && typeof rSrc.followers === "number"
@@ -1908,7 +1921,13 @@ function applyWorldUpdate(
       day: s.day,
     };
   });
-  const notifications: NotificationItem[] = update.notifications.map((n) => ({
+  // Round 1.11.25 — notifications DERIVED client-side from relationshipShifts.
+  // AI contract no longer includes them (saves ~50-100 tokens per call). We
+  // compose a single multi-character notification summarising who reacted,
+  // using the first shift's reason as the preview (with @mentions colored
+  // blue at render time by AlertsScreen). Backward compat: also honor any
+  // notifications the offline path or legacy AI response sent inline.
+  const aiNotifications: NotificationItem[] = (update.notifications ?? []).map((n) => ({
     id: `n-${baseId}-${Math.random().toString(36).slice(2, 6)}`,
     postId: attachedPostId,
     charactersInvolved: n.charactersInvolved,
@@ -1916,6 +1935,33 @@ function applyWorldUpdate(
     preview: n.preview,
     createdAt: nowLabel(),
   }));
+  let derivedNotification: NotificationItem | null = null;
+  if (aiNotifications.length === 0 && update.relationshipShifts.length > 0) {
+    const involved = update.relationshipShifts.slice(0, 4).map((sh) => sh.characterId);
+    const names = involved
+      .map((id) => catalogCharacters.find((c) => c.id === id)?.name?.split(" ")[0])
+      .filter((n): n is string => !!n);
+    const headlineNames =
+      names.length === 0
+        ? "Your contacts"
+        : names.length === 1
+          ? names[0]
+          : names.length === 2
+            ? `${names[0]} and ${names[1]}`
+            : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+    derivedNotification = {
+      id: `n-${baseId}-derived-${Math.random().toString(36).slice(2, 6)}`,
+      postId: attachedPostId,
+      charactersInvolved: involved,
+      headline: `${headlineNames} reacted to your day`,
+      preview: update.relationshipShifts[0]?.reason ?? "",
+      kind: "post-reply",
+      createdAt: nowLabel(),
+    };
+  }
+  const notifications: NotificationItem[] = derivedNotification
+    ? [derivedNotification, ...aiNotifications]
+    : aiNotifications;
   // Apply socialPresence shifts from the AI directly so the Profile gauges actually move.
   const player = update.playerStatChanges
     ? {
