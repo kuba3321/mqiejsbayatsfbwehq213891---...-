@@ -1900,6 +1900,40 @@ playerStatChanges represents how this post lands for the player's Humor / Aura s
 
 // ---------------- Compose suggestions ----------------
 
+// Round 1.11.26 — offline suggestion banks for the composer / event modal
+// chips. The old AI-driven path was burning ~1-3 calls per minute for
+// LOW-STAKES content (suggestion hints, easily ignored by the player).
+// Free-tier RPM budget is better spent on actual content (replies, events,
+// chat). These banks rotate per kind + scenario to keep suggestions feeling
+// fresh without LLM cost.
+const offlineEventSuggestions = [
+  "Give a humble few-word acknowledgment and leave.",
+  "Prepare a formal, high-concept speech on the topic.",
+  "Walk in late, say one cryptic word, and walk back out.",
+  "Dodge the question with a perfectly timed compliment.",
+  "Confess something nobody asked about — make it stick.",
+  "Quote yourself from last week. Pretend it was prophetic.",
+  "Ask whose idea this really was. Wait for the silence.",
+  "Treat it like a press tour. Smile. Reveal nothing.",
+  "Pivot to the next topic before they finish the question.",
+];
+const offlinePostSuggestions = [
+  "i let one label exec talk for forty minutes about ai before i realized he forgot the mic",
+  "@kanyewest the font is actually fine and you should probably take a nap",
+  "if you make it to the studio before midnight your taste is suspect",
+  "wrote a verse, deleted a verse, wrote it again. art is just stubbornness with rhythm.",
+  "the algorithm is having a moment and i am not its therapist",
+  "no thoughts. just a draft i'll publish at 3am and regret by 4.",
+  "today's vibe: confident about one thing, wrong about everything else.",
+  "spotted in the wild: a take so cold it has its own thermostat.",
+  "the studio mic is crying. so am i. team effort.",
+];
+
+function pickN<T>(arr: T[], n: number): T[] {
+  const shuffled = [...arr].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, Math.min(n, arr.length));
+}
+
 export async function generateComposeSuggestions(args: {
   player: PlayerProfile;
   world: World;
@@ -1907,51 +1941,13 @@ export async function generateComposeSuggestions(args: {
   context: string;
   characters: Character[];
 }): Promise<string[]> {
-  if (!args.player.apiKey.trim()) {
-    if (args.kind === "event") {
-      return [
-        "Give a humble few-word acknowledgment and leave.",
-        "Prepare a formal, high-concept speech on the topic.",
-        "Walk in late, say one cryptic word, and walk back out.",
-      ];
-    }
-    return [
-      "i let one label exec talk for forty minutes about ai before i realized he forgot the mic",
-      "@kanyewest the font is actually fine and you should probably take a nap",
-      "if you make it to the studio before midnight your taste is suspect",
-    ];
-  }
-  const charNames = args.characters
-    .slice(0, 6)
-    .map((c) => `${c.name} (${c.handle})`)
-    .join(", ");
-  const system =
-    args.kind === "event"
-      ? `Suggest 3 short, distinct in-character actions the player could take in response to this event.
-Scenario: ${args.world.title}. Player: ${args.player.name} (${args.player.handle}).
-Return STRICT JSON: {"suggestions": ["<10-15 word action>", ...]}`
-      : `Suggest 3 short, sharp, on-brand posts the player could publish next.
-Scenario: ${args.world.title}. Player: ${args.player.name} (${args.player.handle}).
-Available characters they could @mention: ${charNames}.
-Return STRICT JSON: {"suggestions": ["<one tweet-style post>", ...]}`;
-
-  try {
-    const text = await runLLM(args.player, {
-      system,
-      messages: [{ role: "user", content: args.context || "(empty)" }],
-      maxTokens: 400,
-      temperature: 0.95,
-      jsonResponse: true,
-    });
-    const parsed = safeParseJSON(text);
-    const suggestions = (parsed?.suggestions as string[]) ?? [];
-    if (Array.isArray(suggestions) && suggestions.length > 0) {
-      return suggestions.slice(0, 4);
-    }
-  } catch {
-    /* fall through */
-  }
-  return [];
+  // Round 1.11.26 — ALWAYS offline. Suggestions are low-stakes hint chips
+  // — the player rarely picks them verbatim. Spending free-tier quota
+  // on them was wasteful. Quality of static banks here is comparable to
+  // typical AI output for short suggestion text.
+  void args; // kept for signature stability; future re-enable trivial
+  if (args.kind === "event") return pickN(offlineEventSuggestions, 3);
+  return pickN(offlinePostSuggestions, 3);
 }
 
 // ---------------- Activity outcome ----------------
