@@ -40,10 +40,29 @@ const NETWORK_TIMEOUT_MS = 7000;
 // and stamp `geminiCooldownUntilMs` accordingly. Subsequent calls to
 // callGemini check this gate FIRST and throw immediately if the cooldown
 // is still active — the catch in the calling generator then routes to the
-// offline path WITHOUT issuing another doomed network request. This stops
-// the burst of repeated 429s we saw in 1.11.22 diagnostics. Cooldown is
+// offline path WITHOUT issuing another doomed network request. Cooldown is
 // cleared automatically when Date.now() crosses the stamp.
 let geminiCooldownUntilMs = 0;
+
+// Round 1.11.24 — STAGGERED-START QUEUE for Gemini. The cooldown gate from
+// 1.11.23 was REACTIVE (kicks in after the first 429 returns). But the
+// failure mode in production was SIMULTANEOUS BURSTS — refreshFeed,
+// sendChatMessage, and fetchSuggestions all fired within ~100ms of each
+// other and 3 parallel requests reached the API before any of them
+// returned 429. Each call is BLOCKING on previous ONLY for the gap window
+// (default 500ms) — after that next call may start while previous is
+// still in flight. So 5 ops fired together → starts at t=0, 0.5, 1.0,
+// 1.5, 2.0s. Each generates ~5s so all overlap, but quota-wise they hit
+// the API in a smoother distribution that the per-minute window can absorb.
+const GEMINI_MIN_GAP_MS = 500;
+let nextGeminiCallTimeMs = 0;
+
+// Round 1.11.24 — extra safety buffer added on top of API's "retry in Xs"
+// hint when stamping cooldown. The window resets at exactly retrySeconds
+// from now; if we start a new call at retry+1ms the window has barely
+// opened and we often hit ANOTHER 429 (this is what produced the
+// "second-wave 51.5s cooldown" pattern in 1.11.23 logs).
+const GEMINI_COOLDOWN_BUFFER_MS = 3000;
 
 async function callOpenAI(player: PlayerProfile, opts: LLMOptions) {
   const model = player.model.trim() || "gpt-4o-mini";
@@ -172,6 +191,27 @@ async function callGemini(player: PlayerProfile, opts: LLMOptions) {
     const secondsLeft = Math.ceil((geminiCooldownUntilMs - Date.now()) / 1000);
     throw new Error(`Gemini cooldown (${secondsLeft}s remaining)`);
   }
+  // Round 1.11.24 — staggered-start queue. Compute when THIS call is
+  // allowed to start (Math.max of now, next-available-slot), then bump
+  // the slot for whoever calls next. This serialises START TIMES with a
+  // 500ms gap but does NOT serialise completion — calls still fan out in
+  // parallel after their staggered start. Eliminates the "5 ops fire in
+  // the same millisecond" burst that produced the second 429 wave in 1.11.23.
+  const now = Date.now();
+  const startAt = Math.max(now, nextGeminiCallTimeMs);
+  nextGeminiCallTimeMs = startAt + GEMINI_MIN_GAP_MS;
+  const waitMs = startAt - now;
+  if (waitMs > 0) {
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+  // Re-check cooldown AFTER the stagger wait — cooldown may have been
+  // stamped by an earlier-started call that just returned 429 while we
+  // were waiting our turn. Without this re-check, we'd march straight
+  // into the API and hit another 429, burning quota.
+  if (Date.now() < geminiCooldownUntilMs) {
+    const secondsLeft = Math.ceil((geminiCooldownUntilMs - Date.now()) / 1000);
+    throw new Error(`Gemini cooldown (${secondsLeft}s remaining)`);
+  }
   // Round 1.11.20 — default switched from "gemini-2.5-flash" (preview) to
   // "gemini-2.0-flash" (production-stable). The 2.5 preview occasionally
   // ignores `responseMimeType: "application/json"` and replies with a
@@ -223,10 +263,17 @@ async function callGemini(player: PlayerProfile, opts: LLMOptions) {
     if (response.status === 429) {
       const retryMatch = errText.match(/retry in ([\d.]+)s/i);
       const retrySeconds = retryMatch ? parseFloat(retryMatch[1]) : 60;
-      geminiCooldownUntilMs = Date.now() + retrySeconds * 1000;
+      // Round 1.11.24 — add +3s safety buffer on top of API's hint. Starting
+      // exactly at retrySeconds-from-now reliably re-hits 429 because the
+      // per-minute window has only just opened. Empirically a few seconds
+      // of grace prevents the "second-wave 51.5s" cascade observed in
+      // 1.11.23 logs.
+      const totalCooldownMs = retrySeconds * 1000 + GEMINI_COOLDOWN_BUFFER_MS;
+      geminiCooldownUntilMs = Date.now() + totalCooldownMs;
       console.warn(
-        `[ai] Gemini 429 quota exhausted — cooldown for ${retrySeconds.toFixed(1)}s. ` +
-        `Tip: consider switching player.model to "gemini-2.0-flash" (production tier has higher RPM than 2.5 preview).`,
+        `[ai] Gemini 429 quota exhausted — cooldown for ${(totalCooldownMs / 1000).toFixed(1)}s ` +
+          `(API hint ${retrySeconds.toFixed(1)}s + ${GEMINI_COOLDOWN_BUFFER_MS / 1000}s safety). ` +
+          `Tip: consider switching player.model to "gemini-2.0-flash" (production tier has higher RPM than 2.5 preview).`,
       );
     } else {
       // 503 High Demand / 401 Invalid Key — recoverable, warn level
