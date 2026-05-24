@@ -880,17 +880,21 @@ function FeedScreen() {
   const { state, setComposeOpen, triggerEvent, refreshFeed, eventXpRange } = useGame();
   const [refreshing, setRefreshing] = useState(false);
   const xpRange = eventXpRange(state.level);
-  const hasPending = state.pendingActions.length > 0;
 
+  // Round 1.11.19 — UI no longer gates refreshFeed() on a non-empty
+  // pendingActions queue. game-context.tsx (since 1.11.15) decides
+  // autonomously between consuming the queue head and firing an ambient
+  // daily-tick when the queue is empty. The old hasPending gate here was
+  // a left-over from Round 1.8 "quiet refresh" and made the entire
+  // ambient pipeline unreachable from the UI — a layered regression.
   async function onRefresh() {
     setRefreshing(true);
     try {
-      if (hasPending) {
-        await refreshFeed();
-      } else {
-        // No queued consequences → just animate briefly, never spawn new content.
-        await new Promise((r) => setTimeout(r, 400));
-      }
+      await refreshFeed();
+    } catch (error) {
+      // refreshFeed already swallows internal errors via try/finally + setState,
+      // but if anything bubbles up we log defensively and let the spinner clear.
+      console.warn("[FeedScreen] refreshFeed threw:", error);
     } finally {
       setRefreshing(false);
     }
