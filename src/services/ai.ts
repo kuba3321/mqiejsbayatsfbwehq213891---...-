@@ -226,6 +226,18 @@ async function callGemini(player: PlayerProfile, opts: LLMOptions) {
           generationConfig: {
             temperature: opts.temperature ?? 0.85,
             maxOutputTokens: opts.maxTokens ?? 320,
+            // Round 1.11.31 — disable Gemini 2.5 family "thinking" / reasoning
+            // tokens. By default 2.5-flash uses dynamic thinking budget which
+            // CONSUMES maxOutputTokens BEFORE the actual response is written.
+            // Symptom: response truncates at ~40 tokens (~150 chars) with
+            // finishReason=MAX_TOKENS even though we set maxOutputTokens=1500
+            // — because reasoning ate the budget.
+            // Our use case is structured-content generation (JSON), not chain-
+            // of-thought reasoning. Setting thinkingBudget=0 disables reasoning
+            // entirely → full budget available for output → faster + cheaper +
+            // no truncation. Field is no-op on 2.0-flash / older models, so
+            // safe to send unconditionally.
+            thinkingConfig: { thinkingBudget: 0 },
             ...(opts.jsonResponse
               ? { responseMimeType: "application/json" }
               : {}),
