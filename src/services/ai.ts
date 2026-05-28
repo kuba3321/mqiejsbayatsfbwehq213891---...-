@@ -1731,7 +1731,19 @@ Reply behavior changes:
 ${args.crisisContext.layingLow ? "Player is LAYING LOW — do NOT @-mention them in the post or replies; let the crowd argue without them." : ""}`
       : "";
 
+  // Round 1.11.32 — explicit player-identity + lore-icon framing. Without
+  // this, Gemini was reading the @frankocean references in starter posts
+  // and assuming the player WAS Frank Ocean (then writing follow-up
+  // content addressed to Frank Ocean as if he were the human user).
+  // The identity block locks this down: player is ${name} / ${handle},
+  // and any star referenced by handle elsewhere in the feed is an
+  // external NPC in the world.
+  const identityBlock = `PLAYER IDENTITY (the human user behind this game): ${args.player.name} (${args.player.handle}). They are NOT any celebrity in the scenario cast and NOT @frankocean / @drake / @taylor / any other handle that appears in posts. Treat every @-mention in the feed as a SEPARATE in-world celebrity account.
+External lore icons sometimes referenced by celebs in the feed (NOT the player, NOT in the cast): @frankocean, @rihanna, @beyonce, @kanyewest. Mentions of these are commentary about external stars, never the player.`;
+
   const system = `${personaBlock}
+
+${identityBlock}
 
 Scenario: ${args.world.title}. ${args.world.setting ?? args.world.description}.
 ${eventBlock}
@@ -2253,7 +2265,9 @@ export async function generatePostReplies(args: {
 
   const system = `You are running the comment section of a social-media celebrity simulator that should feel like a real X (Twitter) reply thread.
 Scenario: ${args.world.title}. ${args.world.setting ?? ""}.
-Player: ${args.player.name} (${args.player.handle}).
+
+PLAYER IDENTITY (the human user behind this game): ${args.player.name} (${args.player.handle}). They are NOT any celebrity in the cast list below, NOT @frankocean, and NOT any star referenced elsewhere in the feed. Any @-mention you see in starter posts (e.g. @frankocean, @rihanna, @beyonce) is an EXTERNAL in-world celebrity, never the player.
+
 ${args.replyMode ? `Player is REPLYING to a post${args.originalAuthor ? ` by ${args.originalAuthor}` : ""}${args.contextReplyText ? `. Their reply text: "${args.contextReplyText}"` : ""}.` : "Player just PUBLISHED a new post."}
 
 CELEBRITY CHARACTERS available (use these exact ids):

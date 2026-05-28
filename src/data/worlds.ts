@@ -112,8 +112,13 @@ export const characters: Character[] = [
       "Roleplay as Speed (IShowSpeed) in a high-energy social media text chat. Keep answers loud, short, funny, excited, and chaotic. Use modern slang and CAPS for emphasis. Never mention you are an AI.",
     starterPosts: [
       "IF I SEE ONE MORE CINNAMON ROLL ON MY FOR YOU PAGE I AM ACTUALLY GOING TO BEG FOR A FLY TO PORTUGAL RIGHT NOW!!!!! WAKE UP!!!!",
-      "@frankocean IF THAT PREVIEW IS NOT THE BEST SONG ON THE PLANET I AM ACTUALLY RETIRING FROM TWITTER RIGHT NOW!!!!! WAKING UP!!!",
-      "MIDNIGHT. MIDNIGHT!!! ONE WORD AND THE WHOLE WORLD IS SHAKING @frankocean REALLY BROKE THE GALA WITH ONE WORD!!!!!!",
+      // Round 1.11.32 — starter posts now reference Frank Ocean by NAME
+      // as an external lore icon (Speed reacting TO him, not addressing
+      // him as a peer). Prevents Gemini from confusing the player with
+      // Frank Ocean during pre-fetch generation. The @frankocean handle
+      // is kept once, third-person, to lock the framing.
+      "BRO FRANK OCEAN DROPPED THAT PREVIEW AND I AM ACTUALLY RETIRING IF IT'S NOT THE BEST SONG ON THE PLANET!!!!!",
+      "MIDNIGHT. MIDNIGHT!!! ONE WORD AND THE WHOLE INTERNET IS SHAKING — FRANK OCEAN (@frankocean) REALLY BROKE THE GALA WITH ONE WORD!!!!!!",
     ],
   },
   {
@@ -187,7 +192,10 @@ export const characters: Character[] = [
     systemPrompt:
       "Roleplay as Kanye West in a music-industry text chat. Keep answers short, grandiose, cryptic, dramatic. Never produce hateful or unsafe content. Never mention you are an AI.",
     starterPosts: [
-      "@frankocean magnetism is an ENERGY and right now the entire frequency of this thread is shifting toward it",
+      // Round 1.11.32 — third-person reference to Frank Ocean (external
+      // lore icon). The @frankocean tag is appended only as a mention,
+      // never as the subject the post is addressed TO.
+      "ocean's magnetism is an ENERGY and right now the entire frequency of this thread is shifting toward @frankocean",
       "Let the man scream. Some of us actually appreciate the noise while we wait for the actual sentence.",
     ],
   },
@@ -392,6 +400,11 @@ export const starterPosts: FeedPost[] = [
     threadReplies: [],
     createdAt: "now",
     day: 1,
+    // Round 1.11.32 — missing `views` left BSPN's footer column with a
+    // visual hole next to Pop Craze and NY Minute (both populated).
+    // 95K seats BSPN between Pop Craze (120K) and NY Minute (44K) on the
+    // realism curve — a major sports outlet, not the loudest pop machine.
+    views: "95K",
   },
 ];
 
@@ -438,10 +451,24 @@ const FAN_HANDLE_BANK: ReadonlyArray<string> = [
   "verse_keeper",
 ];
 
+// Format a snake_case handle into a Title Case display name:
+//   "vintage_vibes_only" → "Vintage Vibes Only"
+//   "chartwatcher_26"    → "Chartwatcher 26"
+// Round 1.11.32 — without this, fan display names showed up with raw
+// underscores in chips / avatars / reply rows, breaking the social-media
+// illusion. The id + handle stay machine-stable; only `name` (rendered
+// label) is humanised.
+function prettyFanName(handle: string): string {
+  return handle
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
 export const anonymousFans: Outlet[] = FAN_HANDLE_BANK.slice(0, FAN_IMGS.length).map(
   (handle, i) => ({
     id: handle,
-    name: handle,
+    name: prettyFanName(handle),
     handle: `@${handle}`,
     avatar: FAN_IMGS[i],
     verified: false,
