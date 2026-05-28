@@ -4205,6 +4205,9 @@ function PostDetailModal() {
   const [sending, setSending] = useState(false);
   const [activeReplyId, setActiveReplyId] = useState<string | null>(null);
   const [subReplyText, setSubReplyText] = useState("");
+  // Round 1.11.32 Faza F Fix #1 — ref so the top "Reply" action pill can
+  // focus the bottom composer (same behavior as tapping the input).
+  const replyInputRef = useRef<TextInput | null>(null);
   // Round 1.11.5 — local refreshing flag drives RefreshControl spinner on the
   // post detail ScrollView. Pulling down inside an open post fires
   // refreshFeed(), which consumes the next pending action — if the player
@@ -4529,9 +4532,13 @@ function PostDetailModal() {
               alignItems: "center",
             }}
           >
-            {/* Reply pill — primary action, keeps blue fill */}
-            <View
-              style={{
+            {/* Reply pill — primary action, keeps blue fill.
+                Round 1.11.32 Faza F Fix #1 — now a Pressable that focuses
+                the bottom composer. Same effect as tapping the input
+                directly, but the pill is the natural primary CTA. */}
+            <Pressable
+              onPress={() => replyInputRef.current?.focus()}
+              style={({ pressed }) => ({
                 flexDirection: "row",
                 alignItems: "center",
                 justifyContent: "center",
@@ -4540,13 +4547,14 @@ function PostDetailModal() {
                 paddingHorizontal: 14,
                 height: 34,
                 borderRadius: radii.pill,
-              }}
+                opacity: pressed ? 0.85 : 1,
+              })}
             >
               <MessageCircle color={colors.text} size={14} fill={colors.text} />
               <AppText size={13} weight="800">
                 Reply
               </AppText>
-            </View>
+            </Pressable>
             {/* Repost — same pill shape & height as Reply so they sit on one perfectly aligned row */}
             <Pressable
               onPress={() => repostPost(post.id)}
@@ -4615,13 +4623,13 @@ function PostDetailModal() {
 
         <KeyboardAvoidingView
           behavior="padding"
-          // Round 1.11.32 Alpha Fix #7 — bottom reply composer was getting
-          // clipped on iPhones with home-indicator gestures. Bumped
-          // paddingTop 10→14 and paddingBottom from `insets.bottom + 10`
-          // to `insets.bottom + 24` so the "Post" button + "Add a boost"
-          // dashed pill always sit above the gesture area, regardless of
-          // keyboard state. KeyboardAvoidingView still handles the
-          // up-shift when the input focuses.
+          // Round 1.11.32 Faza F Fix #2 — bumped paddingBottom from
+          // `insets.bottom + 24` to `insets.bottom + 40`. Manual testing
+          // showed the "Post" button + "+ add a boost" pill still
+          // clipping on Pro-Max notch devices under the home-indicator
+          // gesture lane; 40px clears every iPhone gesture profile we
+          // tested. Visually generous bottom margin but matches social-
+          // media app conventions (Twitter/X uses ~36-44 here).
           style={{
             position: "absolute",
             left: 0,
@@ -4629,7 +4637,7 @@ function PostDetailModal() {
             bottom: 0,
             paddingHorizontal: 14,
             paddingTop: 14,
-            paddingBottom: insets.bottom + 24,
+            paddingBottom: insets.bottom + 40,
             backgroundColor: colors.surfaceDeep,
             borderTopColor: colors.divider,
             borderTopWidth: 1,
@@ -4648,6 +4656,7 @@ function PostDetailModal() {
             </View>
           </View>
           <TextInput
+            ref={replyInputRef}
             value={reply}
             onChangeText={setReply}
             placeholder={`Reply to ${author.handle}`}
@@ -4730,6 +4739,20 @@ function WorldUpdateToast() {
   // new toast appears; dismiss runs the spring in reverse before clearing
   // state.
   const slide = useRef(new Animated.Value(-700)).current;
+  // Round 1.11.32 Faza F Fix #3 — animateOut chains animation → state
+  // clear. ANY programmatic dismiss (close button, auto-timer, etc.)
+  // routes through this helper so the toast finishes its exit slide
+  // before the component unmounts. Without the chain, dismissToast()
+  // tore the toast off-screen with no animation = visible glitch.
+  const animateOut = (after: () => void) => {
+    Animated.timing(slide, {
+      toValue: -700,
+      duration: 180,
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) after();
+    });
+  };
   useEffect(() => {
     setExpanded(false);
     if (toast) {
@@ -4743,15 +4766,22 @@ function WorldUpdateToast() {
       }).start();
     }
   }, [toast?.id, slide, toast]);
-  const animateOut = (after: () => void) => {
-    Animated.timing(slide, {
-      toValue: -700,
-      duration: 180,
-      useNativeDriver: true,
-    }).start(({ finished }) => {
-      if (finished) after();
-    });
-  };
+  // Round 1.11.32 Faza F Fix #3 — auto-dismiss timer. 8 seconds gives
+  // the player time to read the toast, then animateOut(dismissToast) is
+  // called so the exit slide plays before the component clears. Timer
+  // resets every time toast.id changes. We DO NOT auto-dismiss while
+  // expanded — the player is actively reading the details panel.
+  useEffect(() => {
+    if (!toast) return;
+    if (expanded) return;
+    const timer = setTimeout(() => {
+      animateOut(dismissToast);
+    }, 8000);
+    return () => clearTimeout(timer);
+    // animateOut + dismissToast are stable refs; we only re-arm on toast
+    // change or expanded toggle.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toast?.id, expanded]);
   if (!toast) return null;
 
   // Body for collapsed view — prefer pithy AI-supplied summary, fall back

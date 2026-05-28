@@ -6,12 +6,19 @@ import {
   ChatMessage,
   ContactState,
   CrisisOrigin,
+  EventOutcome,
   PlayerProfile,
   PRStuntOption,
   Provider,
   ScoreChange,
   World,
 } from "@/data/types";
+
+// Round 1.11.32 Faza F — re-export so existing call-sites that import
+// EventOutcome from "@/services/ai" keep compiling. The canonical
+// definition lives in @/data/types now (broke a would-be circular
+// import once GameState gained a pendingNextEvent field).
+export type { EventOutcome };
 
 type RawMessage = { role: "user" | "assistant" | "system"; content: string };
 
@@ -561,12 +568,6 @@ Return STRICT JSON only, no commentary:
 }
 
 // ---------------- Event outcome ----------------
-
-export type EventOutcome = {
-  eventTitle: string;
-  eventBody: string;
-  choices: string[];
-};
 
 export type EventResult = {
   outcomeText: string;

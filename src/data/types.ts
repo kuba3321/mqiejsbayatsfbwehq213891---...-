@@ -1,5 +1,15 @@
 export type Provider = "openai" | "anthropic" | "gemini";
 
+// Round 1.11.32 Faza F — moved from ai.ts so GameState can hold a
+// pre-fetched event without creating a circular import (ai.ts imports
+// from types.ts; the inverse would break the dependency graph).
+// Structurally identical to the old definition; ai.ts now re-imports.
+export type EventOutcome = {
+  eventTitle: string;
+  eventBody: string;
+  choices: string[];
+};
+
 // Round 1.11.32 Faza C — image source widening. The migration to local
 // bundled assets means avatar / banner fields now hold one of TWO shapes:
 //   * `number` — the opaque handle returned by Metro's `require()` for
@@ -408,4 +418,16 @@ export type GameState = {
     targetId?: string;
     effect: string;
   }>;
+
+  // ===== Round 1.11.32 Faza F — Total Pre-fetching =====
+  // The bg fetcher useEffect fills these whenever it has spare cycles
+  // (post buffer already >= 3). triggerEvent / fetchSuggestions consume
+  // them with 0ms latency when present; fall back to live AI when null.
+  // completeEvent clears pendingNextEvent (event has fired) AND
+  // pendingPostSuggestions (player's context just shifted, old
+  // suggestions are stale). Both are intentionally OMITTED from the
+  // FileSystem persistence snapshot — they're cheap to regenerate and
+  // shouldn't survive cold start.
+  pendingNextEvent: EventOutcome | null;
+  pendingPostSuggestions: string[] | null;
 };
