@@ -280,6 +280,18 @@ export type GameState = {
     string,
     { avatar?: string; banner?: string; name?: string; handle?: string; bio?: string; description?: string }
   >;
+  // Persistent identity registry for fan/stan accounts that surface in
+  // the feed or reply threads. When the AI hallucinates a new fan handle
+  // (e.g. "@kanye_truther_4"), the reducer assigns it a stable avatar +
+  // display name from the local pool and stores it here so the same ID
+  // always renders consistently across days. Population happens at WRITE
+  // time (applyPostReplies / applyWorldUpdate); resolveCharacter only
+  // reads — it stays a pure function. Foundation for future Stan Wars
+  // toxic-raid mechanics, where persistent fan identities matter.
+  fanIdentityCache: Record<
+    string,
+    { avatar: string; name: string; handle: string }
+  >;
   editingCharacterId: string | null;
   eventOpen: boolean;
   composeOpen: boolean;

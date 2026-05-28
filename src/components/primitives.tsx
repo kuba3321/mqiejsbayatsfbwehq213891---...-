@@ -59,6 +59,18 @@ export function Screen({
   );
 }
 
+// Plus Jakarta Sans family map. PJS tops out at 800 ExtraBold — any
+// weight="900" in the codebase maps down to 800 so existing call sites
+// keep rendering without a fallback to the system font.
+const jakartaFamily: Record<"400" | "500" | "600" | "700" | "800" | "900", string> = {
+  "400": "PlusJakartaSans_400Regular",
+  "500": "PlusJakartaSans_500Medium",
+  "600": "PlusJakartaSans_600SemiBold",
+  "700": "PlusJakartaSans_700Bold",
+  "800": "PlusJakartaSans_800ExtraBold",
+  "900": "PlusJakartaSans_800ExtraBold",
+};
+
 export function AppText({
   children,
   size = typography.body,
@@ -83,6 +95,11 @@ export function AppText({
         {
           color,
           fontSize: size,
+          // fontFamily carries the visual weight when Plus Jakarta Sans
+          // is loaded; we also keep fontWeight so any non-font-loaded
+          // fallback path (e.g. Web preview without the font yet) still
+          // gets approximately the right boldness from the system font.
+          fontFamily: jakartaFamily[weight],
           fontWeight: weight,
           lineHeight: Math.round(size * 1.28),
           letterSpacing: 0,

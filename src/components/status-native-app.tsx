@@ -37,6 +37,7 @@ import {
 import * as ImagePicker from "expo-image-picker";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Animated,
   KeyboardAvoidingView,
   Modal,
   Pressable,
@@ -666,22 +667,34 @@ function CharacterSetupScreen() {
             ))}
           </ScrollView>
         </View>
-        <Field value={name} onChangeText={setName} placeholder="Name" />
+        <Field value={name} onChangeText={setName} placeholder="Enter your name..." />
         <Field value={handle} onChangeText={setHandle} placeholder="@handle" />
         <Field value={bio} onChangeText={setBio} placeholder="Short bio" multiline />
       </Card>
-      <CapsuleButton
-        onPress={() =>
-          initializeCharacter({
-            name: name.trim() || "Frank",
-            handle: handle.trim().startsWith("@") ? handle.trim() : `@${handle.trim() || "frank"}`,
-            avatar,
-            bio: bio.trim() || "Making music in the silence.",
-          })
-        }
-      >
-        Start Day 1
-      </CapsuleButton>
+      {(() => {
+        // Validation: name + handle required. Blank slate — no "Frank"
+        // fallback. The button disables itself until both are present so
+        // the player commits to their own identity before Day 1.
+        const trimmedName = name.trim();
+        const trimmedHandleRaw = handle.trim();
+        const trimmedHandle = trimmedHandleRaw.replace(/^@+/, "");
+        const ready = trimmedName.length > 0 && trimmedHandle.length > 0;
+        return (
+          <CapsuleButton
+            disabled={!ready}
+            onPress={() =>
+              initializeCharacter({
+                name: trimmedName,
+                handle: `@${trimmedHandle}`,
+                avatar,
+                bio: bio.trim(),
+              })
+            }
+          >
+            Start Day 1
+          </CapsuleButton>
+        );
+      })()}
     </Screen>
   );
 }
@@ -915,37 +928,54 @@ function FeedScreen() {
         ))}
       </ScrollView>
 
-      <Pressable
-        onPress={triggerEvent}
-        disabled={state.isGenerating}
-        style={({ pressed }) => ({
+      {/* Event button — centered absolutely at the horizontal midpoint
+          of the screen via a full-width wrapper (pointerEvents:"box-none"
+          so the wrapper itself never intercepts touches above the feed).
+          This decouples Event's center from the Post button on the right,
+          which previously squeezed Event into an asymmetric pill. */}
+      <View
+        pointerEvents="box-none"
+        style={{
           position: "absolute",
-          left: 80,
-          right: 80,
+          left: 0,
+          right: 0,
           bottom: 96,
-          minHeight: 56,
-          borderRadius: radii.pill,
-          backgroundColor: state.isGenerating ? colors.surfaceSoft : colors.blue,
           alignItems: "center",
-          justifyContent: "center",
-          opacity: pressed ? 0.85 : 1,
-          transform: [{ scale: pressed ? 0.98 : 1 }],
-        })}
+        }}
       >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-          <AppText size={18}>📣</AppText>
-          <View style={{ alignItems: "center" }}>
-            <AppText size={15} weight="900">
-              Event
-            </AppText>
-            <AppText size={11} weight="800" color={colors.amber}>
-              up to +{xpRange.hi} xp
-            </AppText>
+        <Pressable
+          onPress={triggerEvent}
+          disabled={state.isGenerating}
+          style={({ pressed }) => ({
+            minHeight: 56,
+            paddingHorizontal: 22,
+            borderRadius: radii.pill,
+            backgroundColor: state.isGenerating ? colors.surfaceSoft : colors.blue,
+            alignItems: "center",
+            justifyContent: "center",
+            opacity: pressed ? 0.85 : 1,
+            transform: [{ scale: pressed ? 0.98 : 1 }],
+          })}
+        >
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <AppText size={18}>📣</AppText>
+            <View style={{ alignItems: "center" }}>
+              <AppText size={15} weight="900">
+                Event
+              </AppText>
+              <AppText size={11} weight="800" color={colors.amber}>
+                up to +{xpRange.hi} xp
+              </AppText>
+            </View>
+            <AppText size={18}>📣</AppText>
           </View>
-          <AppText size={18}>📣</AppText>
-        </View>
-      </Pressable>
+        </Pressable>
+      </View>
 
+      {/* Post (+) button — anchored to the right edge, sitting alongside
+          the centered Event pill. The two never compete for the same
+          horizontal space anymore: Event is governed by the wrapper above,
+          Post is purely right-aligned. */}
       <Pressable
         onPress={() => setComposeOpen(true)}
         style={({ pressed }) => ({
@@ -3178,13 +3208,13 @@ function EditProfileModal() {
               <AppText size={13} color={colors.muted2}>
                 Character Name
               </AppText>
-              <Field value={name} onChangeText={setName} placeholder="Frank" />
+              <Field value={name} onChangeText={setName} placeholder="Enter your name..." />
             </View>
             <View style={{ gap: 6 }}>
               <AppText size={13} color={colors.muted2}>
                 Handle
               </AppText>
-              <Field value={handle} onChangeText={setHandle} placeholder="@frankocean" />
+              <Field value={handle} onChangeText={setHandle} placeholder="@handle" />
             </View>
             <View style={{ gap: 6 }}>
               <AppText size={13} color={colors.muted2}>
@@ -4593,9 +4623,35 @@ function WorldUpdateToast() {
   // Score Changes panel + Relationships cards instead of the compact summary.
   // Reset to collapsed every time a new toast appears.
   const [expanded, setExpanded] = useState(false);
+  // Round 1.11.32 — animated slide-down from the top, system-push style.
+  // The toast now lives anchored to the safe-area top inset (+8 px breathing
+  // room) so Notch / Dynamic Island / status bar can never overlap text.
+  // translateY starts above the screen (-240) and springs into place when a
+  // new toast appears; dismiss runs the spring in reverse before clearing
+  // state.
+  const slide = useRef(new Animated.Value(-240)).current;
   useEffect(() => {
     setExpanded(false);
-  }, [toast?.id]);
+    if (toast) {
+      slide.setValue(-240);
+      Animated.spring(slide, {
+        toValue: 0,
+        useNativeDriver: true,
+        damping: 18,
+        stiffness: 160,
+        mass: 1,
+      }).start();
+    }
+  }, [toast?.id, slide, toast]);
+  const animateOut = (after: () => void) => {
+    Animated.timing(slide, {
+      toValue: -240,
+      duration: 180,
+      useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) after();
+    });
+  };
   if (!toast) return null;
 
   // Body for collapsed view — prefer pithy AI-supplied summary, fall back
@@ -4632,7 +4688,7 @@ function WorldUpdateToast() {
           </AppText>
         )}
         <View style={{ flex: 1 }} />
-        <Pressable onPress={dismissToast} hitSlop={14}>
+        <Pressable onPress={() => animateOut(dismissToast)} hitSlop={14}>
           <X color={colors.muted2} size={18} />
         </Pressable>
       </View>
@@ -4765,21 +4821,25 @@ function WorldUpdateToast() {
     </>
   );
 
-  // Anchor strategy:
-  // - Collapsed: bottom-anchored, content auto-sizes (compact pop-up).
-  // - Expanded: top + bottom anchored to claim a safe-area-aware viewport,
-  //   inner card uses flex:1 + ScrollView so the X stays sticky and long
-  //   relationship lists scroll instead of pushing the close button off-screen.
+  // Anchor strategy — Round 1.11.32:
+  // The toast now drops in from the top like a system push notification.
+  // `top` is anchored to insets.top + 8 so Notch / Dynamic Island / status
+  // bar can NEVER overlap the card (the +8 buffer is the minimum visual
+  // breathing room around iOS Dynamic Island and Android punch-holes).
+  // Animated translateY drives the slide; expanded mode extends downward
+  // (bottom anchor) so long relationship lists can scroll inside the card
+  // without pushing the close button below the screen.
   return (
-    <View
+    <Animated.View
       pointerEvents="box-none"
       style={{
         position: "absolute",
-        top: expanded ? insets.top + 12 : undefined,
-        bottom: insets.bottom + 110,
+        top: insets.top + 8,
+        bottom: expanded ? insets.bottom + 110 : undefined,
         left: 14,
         right: 14,
         alignItems: "center",
+        transform: [{ translateY: slide }],
       }}
     >
       <View
@@ -4815,7 +4875,7 @@ function WorldUpdateToast() {
           <View style={{ gap: 10 }}>{bodyContent}</View>
         )}
       </View>
-    </View>
+    </Animated.View>
   );
 }
 

@@ -82,14 +82,17 @@ export function getBannerChoices() {
   return bannerChoices;
 }
 
+// Blank-slate default. Player Setup screen must collect name/handle/bio
+// before initializeCharacter() runs — these empty strings exist so the
+// PlayerProfile type stays satisfied during the brief window between
+// state hydration and the Setup screen.
 const defaultPlayer: PlayerProfile = {
-  name: "Frank",
-  handle: "@frankocean",
-  avatar: avatarChoices[4],
+  name: "",
+  handle: "",
+  avatar: avatarChoices[0],
   banner: bannerChoices[0],
-  bio: "Making music in the silence. Living life on my own frequency.",
-  description:
-    "An artist who only releases when the world really needs it. The silence is the strategy.",
+  bio: "",
+  description: "",
   provider: "openai",
   apiKey: "",
   model: "gpt-4o-mini",
@@ -260,6 +263,7 @@ function createInitialState(): GameState {
     bonusEnergy: 0,
     isGenerating: false,
     activeChatId: null,
+    fanIdentityCache: {},
   };
 }
 
@@ -647,6 +651,9 @@ export function GameProvider({ children }: PropsWithChildren) {
             bonusEnergy: 0,
             isGenerating: false,
             activeChatId: null,
+            // Clear cache on fresh character init — old fan identities
+            // from a previous scenario should not leak in.
+            fanIdentityCache: {},
             activeTab: "feed",
             phase: "game",
           };
@@ -1049,7 +1056,30 @@ export function GameProvider({ children }: PropsWithChildren) {
         // would silently drop their comments.
         const fan = !base && !outlet ? anonymousFans.find((c) => c.id === id) : undefined;
         const source = base ?? outlet ?? fan;
-        if (!source) return undefined;
+        // PURE READ from fanIdentityCache for AI-hallucinated fan IDs that
+        // weren't in any of the static catalogs. The cache is populated at
+        // WRITE time inside applyPostReplies / applyWorldUpdate, so by the
+        // time the UI calls resolveCharacter for one of these IDs the entry
+        // already exists in state.fanIdentityCache and we return a stable
+        // identity instead of dropping the row.
+        if (!source) {
+          const cached = state.fanIdentityCache[id];
+          if (!cached) return undefined;
+          return {
+            id,
+            name: cached.name,
+            handle: cached.handle,
+            avatar: cached.avatar,
+            banner: "",
+            bio: "",
+            description: undefined,
+            followers: 0,
+            verified: false,
+            proactive: false,
+            systemPrompt: "",
+            isOutlet: true, // render as outlet/fan — no profile sheet
+          } as Character & { isOutlet?: boolean };
+        }
         const override = state.characterOverrides[id] ?? {};
         // Coerce all three shapes (Character / Outlet / Fan) to Character-like.
         const merged = {
@@ -1824,6 +1854,49 @@ function rollFollowerGain(likeBoost: number, player: PlayerProfile): number {
   return Math.floor((fromLikes + base) * presenceBonus);
 }
 
+// Deterministic identity assignment for unknown fan/stan author IDs.
+// AI sometimes hallucinates handles ("@kanye_truther_4") that aren't in
+// the static `anonymousFans` pool. When we see one for the first time
+// we hash its ID into the pool to pick a stable avatar + display name
+// and write the assignment to fanIdentityCache. Subsequent appearances
+// of the same ID reuse the cached identity, so the same handle always
+// renders consistently across days. resolveCharacter reads from the
+// cache and stays pure — population happens only at WRITE time inside
+// the apply* reducers below. Returns either the mutated cache (new
+// entries minted) or the original reference (no-op fast path).
+function mintFanIdentities(
+  cache: GameState["fanIdentityCache"],
+  candidateIds: string[],
+): GameState["fanIdentityCache"] {
+  let next: GameState["fanIdentityCache"] | null = null;
+  for (const id of candidateIds) {
+    if (!id || id === "player") continue;
+    if (findAnyCharacter(id)) continue; // catalog member — nothing to mint
+    if (cache[id]) continue;            // already cached
+    // djb2-ish hash → stable bucket inside anonymousFans pool.
+    let h = 0;
+    for (let i = 0; i < id.length; i++) {
+      h = ((h << 5) - h + id.charCodeAt(i)) | 0;
+    }
+    const pick = anonymousFans[Math.abs(h) % anonymousFans.length];
+    if (!next) next = { ...cache };
+    // Derive a friendly display name from the handle: strip leading "@",
+    // turn separators into spaces, title-case the words. "@kanye_truther_4"
+    // → "Kanye Truther 4".
+    const cleanHandle = id.replace(/^@+/, "");
+    const display = cleanHandle
+      .replace(/[_\-.]+/g, " ")
+      .trim()
+      .replace(/\b\w/g, (m) => m.toUpperCase()) || cleanHandle;
+    next[id] = {
+      avatar: pick.avatar,
+      name: display,
+      handle: `@${cleanHandle}`,
+    };
+  }
+  return next ?? cache;
+}
+
 function applyWorldUpdate(
   s: GameState,
   update: Awaited<ReturnType<typeof generateWorldUpdate>>,
@@ -1966,12 +2039,23 @@ function applyWorldUpdate(
         },
       }
     : s.player;
+  // Mint identities for any AI-hallucinated fan IDs that just landed in
+  // the feed (post authors + their thread reply authors). This is the
+  // WRITE-time hook: resolveCharacter will see them on the next render
+  // without doing any setState itself.
+  const candidateIds: string[] = [];
+  for (const p of update.posts) candidateIds.push(p.characterId);
+  for (const p of newPosts) {
+    for (const tr of p.threadReplies) candidateIds.push(tr.authorId);
+  }
+  const fanIdentityCache = mintFanIdentities(s.fanIdentityCache, candidateIds);
   return {
     ...s,
     player,
     contacts,
     posts: [...newPosts, ...s.posts],
     notifications: [...notifications, ...s.notifications],
+    fanIdentityCache,
   };
 }
 
@@ -2161,12 +2245,20 @@ function applyPostReplies(
     })
     .filter((x): x is NonNullable<typeof x> => x !== null)
     .slice(0, 5);
+  // Mint identities for any AI-hallucinated fan IDs in this batch of
+  // replies. Same WRITE-time hook as applyWorldUpdate — keeps
+  // resolveCharacter pure.
+  const fanIdentityCache = mintFanIdentities(
+    s.fanIdentityCache,
+    newReplies.map((r) => r.authorId),
+  );
   return {
     ...s,
     player,
     contacts,
     posts,
     notifications: notification ? [notification, ...s.notifications] : s.notifications,
+    fanIdentityCache,
     lastToast: {
       id: `t-${baseTime}`,
       headline: replyHeadline,
