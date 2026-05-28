@@ -450,8 +450,23 @@ function nowLabel() {
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
+// Round 1.11.32 Faza G — three-tier haptic palette.
+// Light  → ambient selection, navigation, suggestion taps (high frequency,
+//          shouldn't feel intrusive).
+// Medium → committed actions: publishing a post, triggering an event.
+//          Player just made a real choice — they should feel the click.
+// Heavy  → narrative shock moments: crisisLevel crossing 50 upwards.
+//          The "oh no" thump as the drama hits a milestone.
+// All three are best-effort: silent failure (.catch) so the app doesn't
+// crash on devices without haptic hardware.
 function softHaptic() {
   void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => undefined);
+}
+function mediumHaptic() {
+  void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => undefined);
+}
+function heavyHaptic() {
+  void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => undefined);
 }
 
 function logEntry(args: Omit<ActivityLogEntry, "id" | "createdAt">): ActivityLogEntry {
@@ -728,11 +743,25 @@ export function GameProvider({ children }: PropsWithChildren) {
           const cast: Character[] = Object.keys(cur.contacts)
             .map((id) => [...catalogCharacters, ...cur.customCharacters].find((c) => c.id === id))
             .filter((c): c is Character => !!c);
+          // Round 1.11.32 Faza G — Deep pre-fetch. Suggestions need to
+          // land 0ms relevant to whatever the player is ABOUT to
+          // experience. Priority for the context string:
+          //   1. pendingNextEvent — if the bg fetcher already prepped
+          //      the upcoming event, draft compose suggestions that
+          //      anticipate it (player ends event → opens Compose →
+          //      sees sharp follow-ups in the prompt list).
+          //   2. currentEventContext — fall back to the last event's
+          //      recap when no future event is queued yet.
+          //   3. Empty string — Day 1 with no event history.
+          const suggestionContext =
+            cur.pendingNextEvent
+              ? `UPCOMING event "${cur.pendingNextEvent.eventTitle}": ${cur.pendingNextEvent.eventBody}`
+              : (cur.currentEventContext ?? "");
           const suggestions = await generateComposeSuggestions({
             player: cur.player,
             world: activeWorld,
             kind: "post",
-            context: cur.currentEventContext ?? "",
+            context: suggestionContext,
             characters: cast,
           });
           setState((s2) => ({
@@ -1129,7 +1158,10 @@ export function GameProvider({ children }: PropsWithChildren) {
           setState((s) => ({ ...s, lastToast: outOfEnergyToast(), composeOpen: false }));
           return;
         }
-        softHaptic();
+        // Round 1.11.32 Faza G — Medium tier: publishing a post is a
+        // committed action, deserves a meatier physical click than the
+        // ambient Light selection feedback.
+        mediumHaptic();
         const postId = `player-${Date.now()}`;
         const newPost: FeedPost = {
           id: postId,
@@ -1244,7 +1276,19 @@ export function GameProvider({ children }: PropsWithChildren) {
                     }
                   : undefined,
             });
-            if (result) setState((s) => applyPostReplies(s, post.id, result, contextReplyId));
+            if (result)
+              setState((s) => {
+                const afterReplies = applyPostReplies(s, post.id, result, contextReplyId);
+                // Round 1.11.32 Faza G — bump player replies on ALL posts
+                // (not just the targeted one). applyPostReplies handles
+                // the focused post's growth; this layer covers older
+                // player replies sitting on other posts so the feed
+                // doesn't have visibly "frozen" engagement anywhere.
+                return {
+                  ...afterReplies,
+                  posts: bumpAllPlayerReplyLikes(afterReplies.posts, afterReplies.player),
+                };
+              });
           } finally {
             isFetchingRef.current = false;
             setState((s) => ({ ...s, isGenerating: false }));
@@ -1263,12 +1307,21 @@ export function GameProvider({ children }: PropsWithChildren) {
           (a) => a.kind !== "post-replies",
         );
         if (buffered.length > 0 || staleActions.length > 0) {
-          setState((s) => ({
-            ...s,
-            posts: [...s.pendingBackgroundPosts, ...s.posts],
-            pendingBackgroundPosts: [],
-            pendingActions: s.pendingActions.filter((a) => a.kind === "post-replies"),
-          }));
+          setState((s) => {
+            // Round 1.11.32 Faza G — every buffer-drain refresh bumps
+            // player reply likes across the whole feed too. The buffered
+            // posts have NO player replies (they're fresh AI content),
+            // so the bump only effectively touches OLD posts where the
+            // player previously commented. Free engagement growth on
+            // every pull, no extra AI round-trip.
+            const merged = [...s.pendingBackgroundPosts, ...s.posts];
+            return {
+              ...s,
+              posts: bumpAllPlayerReplyLikes(merged, s.player),
+              pendingBackgroundPosts: [],
+              pendingActions: s.pendingActions.filter((a) => a.kind === "post-replies"),
+            };
+          });
           return;
         }
 
@@ -1819,7 +1872,9 @@ export function GameProvider({ children }: PropsWithChildren) {
 
       // ----- event flow
       triggerEvent: async () => {
-        softHaptic();
+        // Round 1.11.32 Faza G — Medium tier: triggering an event opens a
+        // new beat of the day. Player is committing to the next chapter.
+        mediumHaptic();
         // Round 1.11.32 Faza F — pre-fetch consumption. If the bg fetcher
         // has already filled pendingNextEvent, surface it instantly (0ms)
         // and drop the slot so the next fetcher tick can prefetch the
@@ -2650,6 +2705,37 @@ function bumpPlayerReplyLikes(player: PlayerProfile): number {
   return presenceBump + followerBump;
 }
 
+// Round 1.11.32 Faza G — Bump the player's reply likes across EVERY
+// post on the feed, not just the one a post-replies action is targeting.
+// The original Faza D version (inside applyPostReplies) only touched
+// the post being replied to, so older player replies under other posts
+// stayed frozen at their initial roll forever. This helper runs on
+// every refreshFeed pull (Path 1 + Path 2) so the entire feed's player
+// engagement visibly grows together — your replies live their own life.
+//
+// Each player reply gets its OWN random bump (separate rollPlayerReplyLikes
+// dice per reply) rather than one shared value, so the feed feels organic
+// rather than uniform. Returns a fresh posts array — caller swaps it in.
+function bumpAllPlayerReplyLikes(
+  posts: FeedPost[],
+  player: PlayerProfile,
+): FeedPost[] {
+  let touched = false;
+  const next = posts.map((p) => {
+    let postTouched = false;
+    const replies = p.threadReplies.map((tr) => {
+      if (tr.authorId !== "player") return tr;
+      postTouched = true;
+      return { ...tr, likes: tr.likes + bumpPlayerReplyLikes(player) };
+    });
+    if (!postTouched) return p;
+    touched = true;
+    return { ...p, threadReplies: replies };
+  });
+  // Skip the array allocation when no player replies existed.
+  return touched ? next : posts;
+}
+
 // =============================================================
 // Round 1.11.32 Faza D — Crisis engine helpers (pure functions)
 // =============================================================
@@ -2682,6 +2768,15 @@ function applyCrisisDelta(
   origin?: CrisisOrigin,
 ): GameState {
   const newLevel = Math.max(0, Math.min(100, s.crisisLevel + delta));
+  // Round 1.11.32 Faza G — Heavy haptic on the 50 threshold crossing.
+  // The "drama just hit a milestone" moment — pop-music critic timeline
+  // tips from passing storm into full meltdown. Only fires on UPWARD
+  // crossing (prev < 50 && new >= 50) so PR-stunt downward movement
+  // doesn't accidentally retrigger it. Fire-and-forget side effect; the
+  // reducer itself stays pure on its return value.
+  if (s.crisisLevel < 50 && newLevel >= 50) {
+    heavyHaptic();
+  }
   if (s.crisisLevel === 0 && newLevel > 0) {
     return {
       ...s,
