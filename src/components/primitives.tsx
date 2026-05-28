@@ -1,5 +1,20 @@
-import { Image } from "expo-image";
+import { Image, type ImageSource } from "expo-image";
 import React, { PropsWithChildren } from "react";
+
+import { AvatarSource } from "@/data/types";
+
+// Round 1.11.32 Faza C — normalise our union AvatarSource ("string" URI or
+// "number" require-handle) into a shape expo-image's <Image source> accepts.
+// Numbers (require'd local assets) pass through as-is; strings get wrapped
+// in `{ uri }`. Empty strings become a transparent placeholder via
+// `undefined` so expo-image renders its fallback color instead of crashing
+// on `{ uri: "" }` requests.
+export function imageSource(s: AvatarSource | null | undefined): ImageSource | number | undefined {
+  if (s === undefined || s === null) return undefined;
+  if (typeof s === "number") return s;
+  if (s.length === 0) return undefined;
+  return { uri: s };
+}
 import {
   ActivityIndicator,
   GestureResponderEvent,
@@ -237,15 +252,19 @@ export function Avatar({
   ring,
   ringWidth = 2,
 }: {
-  uri: string;
+  // Round 1.11.32 Faza C — `uri` now accepts both a URL string AND the
+  // numeric handle returned by require(). The prop name stays for backward
+  // compat across the ~30 call sites; rename can come in a later round.
+  uri: AvatarSource;
   size?: number;
   ring?: string;
   ringWidth?: number;
 }) {
+  const source = imageSource(uri);
   if (!ring) {
     return (
       <Image
-        source={{ uri }}
+        source={source}
         contentFit="cover"
         transition={180}
         style={{
@@ -269,7 +288,7 @@ export function Avatar({
       }}
     >
       <Image
-        source={{ uri }}
+        source={source}
         contentFit="cover"
         transition={180}
         style={{

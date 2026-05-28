@@ -57,6 +57,7 @@ import {
   worlds as builtinWorlds,
 } from "@/data/worlds";
 import {
+  AvatarSource,
   Character,
   ChemistryType,
   FeedPost,
@@ -80,6 +81,7 @@ import {
   Field,
   formatCount,
   IconButton,
+  imageSource,
   LoadingScreen,
   MilestoneNode,
   ProgressBar,
@@ -2366,7 +2368,7 @@ function ChatBubble({
 }: {
   message: string;
   mine: boolean;
-  avatar: string;
+  avatar: AvatarSource;
   createdAt: string;
 }) {
   return (
@@ -2473,7 +2475,7 @@ function AlertsScreen() {
         state.notifications.map((item) => {
           const involved = item.charactersInvolved
             .map((id) => resolveCharacter(id))
-            .filter(Boolean) as Array<{ avatar: string; name: string }>;
+            .filter(Boolean) as Array<{ avatar: AvatarSource; name: string }>;
           const resolvedHeadline = item.charactersInvolved.reduce((acc, id) => {
             const c = resolveCharacter(id);
             return c ? acc.replaceAll(id, c.name) : acc;
@@ -2601,7 +2603,7 @@ function ProfileScreen() {
     >
       <View style={{ height: 160 }}>
         <Image
-          source={{ uri: state.player.banner }}
+          source={imageSource(state.player.banner)}
           contentFit="cover"
           style={{ width: "100%", height: "100%" }}
         />
@@ -2879,7 +2881,7 @@ function CharacterProfileModal() {
       <View style={{ flex: 1, backgroundColor: colors.bg }}>
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 30 }}>
           <View style={{ height: 200 }}>
-            <Image source={{ uri: character.banner }} contentFit="cover" style={{ width: "100%", height: "100%" }} />
+            <Image source={imageSource(character.banner)} contentFit="cover" style={{ width: "100%", height: "100%" }} />
             <View
               style={{
                 position: "absolute",
@@ -3143,7 +3145,7 @@ function EditProfileModal() {
           </View>
 
           <View style={{ height: 140 }}>
-            <Image source={{ uri: banner }} contentFit="cover" style={{ width: "100%", height: "100%" }} />
+            <Image source={imageSource(banner)} contentFit="cover" style={{ width: "100%", height: "100%" }} />
             <Pressable
               onPress={async () => {
                 const uri = await pickImageAsync([16, 9]);
@@ -4008,7 +4010,7 @@ function AddCharacterModal() {
           <ScrollView contentContainerStyle={{ paddingBottom: 100 }}>
             <View style={{ height: 200, marginBottom: 10 }}>
               <Image
-                source={{ uri: selectedChar.banner }}
+                source={imageSource(selectedChar.banner)}
                 contentFit="cover"
                 style={{ width: "100%", height: "100%" }}
               />
@@ -5339,8 +5341,11 @@ function EditCharacterModal() {
   const [handle, setHandle] = useState("");
   const [bio, setBio] = useState("");
   const [description, setDescription] = useState("");
-  const [avatar, setAvatar] = useState("");
-  const [banner, setBanner] = useState("");
+  // Round 1.11.32 Faza C — explicit AvatarSource type so setState accepts
+  // either a string URI (image-picker output) or a require()'d asset
+  // handle (number) from the static catalog.
+  const [avatar, setAvatar] = useState<AvatarSource>("");
+  const [banner, setBanner] = useState<AvatarSource>("");
 
   useEffect(() => {
     if (!character) return;
@@ -5400,7 +5405,7 @@ function EditCharacterModal() {
 
           <View style={{ height: 160, marginTop: 12 }}>
             {banner ? (
-              <Image source={{ uri: banner }} contentFit="cover" style={{ width: "100%", height: "100%" }} />
+              <Image source={imageSource(banner)} contentFit="cover" style={{ width: "100%", height: "100%" }} />
             ) : (
               <View style={{ flex: 1, backgroundColor: colors.surfaceAlt }} />
             )}

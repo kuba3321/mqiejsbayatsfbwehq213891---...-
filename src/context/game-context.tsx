@@ -23,6 +23,7 @@ import {
 import {
   ActivityInvite,
   ActivityLogEntry,
+  AvatarSource,
   Character,
   ChatMessage,
   ChemistryType,
@@ -337,7 +338,7 @@ type GameContextValue = {
   toggleHideDMsInLog: () => void;
   dismissToast: () => void;
   resolveCharacter: (id: string) => (Character & { isOutlet?: boolean }) | undefined;
-  updateCharacterOverride: (id: string, patch: Partial<{ avatar: string; banner: string; name: string; handle: string; bio: string; description: string }>) => void;
+  updateCharacterOverride: (id: string, patch: Partial<{ avatar: AvatarSource; banner: AvatarSource; name: string; handle: string; bio: string; description: string }>) => void;
 
   // game logic
   triggerEvent: () => Promise<void>;

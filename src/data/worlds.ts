@@ -1,17 +1,87 @@
 import { Character, FeedPost, Outlet, World } from "./types";
 
-// Avatar / banner pool: Unsplash placeholders (curated photo IDs that look stylistically apt).
-// These are the "real names + placeholder photos" setup confirmed by the user.
+// ===========================================================
+// Round 1.11.32 Faza C — LOCAL ASSET REGISTRY
+// ===========================================================
+// All celebrity / outlet / fan avatars are now bundled out of
+// `assets/images/characters/`. Bundler (Metro) requires literal string
+// arguments to require() — no template-string interpolation works here
+// — so each file gets its own explicit handle below. The shape returned
+// by require() is a number (Metro's asset-registry handle), threaded
+// through types.ts → AvatarSource and primitives.tsx → imageSource().
+//
+// Per design: BANNER = AVATAR (same image) for every catalog character,
+// matching the original Status look where the profile sheet's banner is
+// a faded blow-up of the avatar.
+
+// --- Main characters (10 files) ---
+const SABRINA_IMG = require("../../assets/images/characters/sabrina_carpenter.webp");
+const SPEED_IMG = require("../../assets/images/characters/ishowspeed.jpg");
+const BILLIE_IMG = require("../../assets/images/characters/billie_eilish.webp");
+const DRAKE_IMG = require("../../assets/images/characters/drake.webp");
+const TAYLOR_IMG = require("../../assets/images/characters/taylor_swift.webp");
+const KANYE_IMG = require("../../assets/images/characters/kanye_west.webp");
+const BEYONCE_IMG = require("../../assets/images/characters/beyonce.webp");
+const TYLER_IMG = require("../../assets/images/characters/tyler_the_creator.webp");
+const ARIANA_IMG = require("../../assets/images/characters/ariana_grande.webp");
+const WEEKND_IMG = require("../../assets/images/characters/the_weeknd.webp");
+
+// --- Outlets (3 files) ---
+const POPCRAZE_IMG = require("../../assets/images/characters/pop_craze.png");
+const NYMINUTE_IMG = require("../../assets/images/characters/new_york_minute.png");
+const BSPN_IMG = require("../../assets/images/characters/bspn.png");
+
+// --- Anonymous fans (30 files, fan_1.jpg … fan_30.jpg) ---
+// Metro can't loop `require(\`fan_${i}.jpg\`)` — each path must be a
+// static string. We enumerate explicitly into FAN_IMGS[]; downstream
+// builders index this array to pair sequential fan accounts with
+// sequential images. Adding more fans? Append to the list AND extend
+// the buildFanRegistry() loop further down.
+const FAN_IMGS: number[] = [
+  require("../../assets/images/characters/fan_1.jpg"),
+  require("../../assets/images/characters/fan_2.jpg"),
+  require("../../assets/images/characters/fan_3.jpg"),
+  require("../../assets/images/characters/fan_4.jpg"),
+  require("../../assets/images/characters/fan_5.jpg"),
+  require("../../assets/images/characters/fan_6.jpg"),
+  require("../../assets/images/characters/fan_7.jpg"),
+  require("../../assets/images/characters/fan_8.jpg"),
+  require("../../assets/images/characters/fan_9.jpg"),
+  require("../../assets/images/characters/fan_10.jpg"),
+  require("../../assets/images/characters/fan_11.jpg"),
+  require("../../assets/images/characters/fan_12.jpg"),
+  require("../../assets/images/characters/fan_13.jpg"),
+  require("../../assets/images/characters/fan_14.jpg"),
+  require("../../assets/images/characters/fan_15.jpg"),
+  require("../../assets/images/characters/fan_16.jpg"),
+  require("../../assets/images/characters/fan_17.jpg"),
+  require("../../assets/images/characters/fan_18.jpg"),
+  require("../../assets/images/characters/fan_19.jpg"),
+  require("../../assets/images/characters/fan_20.jpg"),
+  require("../../assets/images/characters/fan_21.jpg"),
+  require("../../assets/images/characters/fan_22.jpg"),
+  require("../../assets/images/characters/fan_23.jpg"),
+  require("../../assets/images/characters/fan_24.jpg"),
+  require("../../assets/images/characters/fan_25.jpg"),
+  require("../../assets/images/characters/fan_26.jpg"),
+  require("../../assets/images/characters/fan_27.jpg"),
+  require("../../assets/images/characters/fan_28.jpg"),
+  require("../../assets/images/characters/fan_29.jpg"),
+  require("../../assets/images/characters/fan_30.jpg"),
+];
+
+// Export so other modules (game-context's mintFanIdentities) can pick a
+// stable avatar for AI-hallucinated fan IDs that aren't in the static
+// anonymousFans list — keeps look-and-feel consistent for ad-hoc handles.
+export const FAN_IMAGE_POOL: ReadonlyArray<number> = FAN_IMGS;
 
 export const characters: Character[] = [
   {
     id: "sabrina",
     name: "Sabrina Carpenter",
     handle: "@sabrinacarpenter1",
-    avatar:
-      "https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?auto=format&fit=crop&w=400&q=80",
-    banner:
-      "https://images.unsplash.com/photo-1501386761578-eac5c94b800a?auto=format&fit=crop&w=1200&q=80",
+    avatar: SABRINA_IMG,
+    banner: SABRINA_IMG,
     bio: "short n' sweet 💗",
     description:
       "Pop princess with an espresso habit, a fast wit, and a perfectly engineered chaos streak. Her DMs are tea, her posts are louder.",
@@ -30,10 +100,8 @@ export const characters: Character[] = [
     id: "speed",
     name: "Speed",
     handle: "@ishowspeed",
-    avatar:
-      "https://images.unsplash.com/photo-1499996860823-5214fcc65f8f?auto=format&fit=crop&w=400&q=80",
-    banner:
-      "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1200&q=80",
+    avatar: SPEED_IMG,
+    banner: SPEED_IMG,
     bio: "full volume, full chaos, zero chill",
     description:
       "American streamer who treats every notification like a world event. Loud, loyal, lives for the drop.",
@@ -52,10 +120,8 @@ export const characters: Character[] = [
     id: "billie",
     name: "Billie Eilish",
     handle: "@billieeilish",
-    avatar:
-      "https://images.unsplash.com/photo-1531123897727-8f129e1688ce?auto=format&fit=crop&w=400&q=80",
-    banner:
-      "https://images.unsplash.com/photo-1511379938547-c1f69419868d?auto=format&fit=crop&w=1200&q=80",
+    avatar: BILLIE_IMG,
+    banner: BILLIE_IMG,
     bio: "quiet rooms, loud songs.",
     description:
       "Whispered hooks, oversized silhouettes, eyes that read the room before it speaks. Watches everything, says almost nothing.",
@@ -73,10 +139,8 @@ export const characters: Character[] = [
     id: "drake",
     name: "Drake",
     handle: "@drake",
-    avatar:
-      "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?auto=format&fit=crop&w=400&q=80",
-    banner:
-      "https://images.unsplash.com/photo-1516280440614-37939bbacd81?auto=format&fit=crop&w=1200&q=80",
+    avatar: DRAKE_IMG,
+    banner: DRAKE_IMG,
     bio: "6 God* | *OVO SZN* | *Nobody Does It Better* 🏆",
     description:
       "Hype machine that announces wins, clowns competition, flexes stats. Always one step ahead, always letting you know.",
@@ -94,10 +158,8 @@ export const characters: Character[] = [
     id: "taylor",
     name: "Taylor Swift",
     handle: "@TaylorSwift",
-    avatar:
-      "https://images.unsplash.com/photo-1512316609839-ce289d3eba0a?auto=format&fit=crop&w=400&q=80",
-    banner:
-      "https://images.unsplash.com/photo-1506157786151-b8491531f063?auto=format&fit=crop&w=1200&q=80",
+    avatar: TAYLOR_IMG,
+    banner: TAYLOR_IMG,
     bio: "singer-songwriter. storyteller. cat lover. turning heartbreak into melodies since 1989",
     description:
       "Taylor Alison Swift (born December 13, 1989) is an American singer-songwriter. Recognized for her songwriting, musical versatility, artistic reinventions, and influence on the industry.",
@@ -114,10 +176,8 @@ export const characters: Character[] = [
     id: "kanye",
     name: "Kanye",
     handle: "@kanyewest",
-    avatar:
-      "https://images.unsplash.com/photo-1492447166138-50c3889fccb1?auto=format&fit=crop&w=400&q=80",
-    banner:
-      "https://images.unsplash.com/photo-1514525253161-7a46d19cd819?auto=format&fit=crop&w=1200&q=80",
+    avatar: KANYE_IMG,
+    banner: KANYE_IMG,
     bio: "singer, songwriter, business owner, creator",
     description:
       "Visionary creative with a louder-than-the-room belief in himself. Cryptic, grand, allergic to nuance.",
@@ -135,10 +195,8 @@ export const characters: Character[] = [
     id: "beyonce",
     name: "Beyoncé",
     handle: "@beyonce",
-    avatar:
-      "https://images.unsplash.com/photo-1503104834685-7205e8607eb9?auto=format&fit=crop&w=400&q=80",
-    banner:
-      "https://images.unsplash.com/photo-1485178575877-1a13bf489dfe?auto=format&fit=crop&w=1200&q=80",
+    avatar: BEYONCE_IMG,
+    banner: BEYONCE_IMG,
     bio: "Grammy-winning artist. Founder of Parkwood Entertainment. Actress. Philanthropist. Proud Texan.",
     description:
       "Iconic singer, songwriter, and actress known for her powerful vocals, dynamic performances, and cultural influence. Queen Bey has dominated the music industry for decades.",
@@ -155,10 +213,8 @@ export const characters: Character[] = [
     id: "tyler",
     name: "Tyler, The Creator",
     handle: "@tylerthecreator",
-    avatar:
-      "https://images.unsplash.com/photo-1545167622-3a6ac756afa4?auto=format&fit=crop&w=400&q=80",
-    banner:
-      "https://images.unsplash.com/photo-1483393458019-411bc6bd104e?auto=format&fit=crop&w=1200&q=80",
+    avatar: TYLER_IMG,
+    banner: TYLER_IMG,
     bio: "running my own museum out here",
     description:
       "Eccentric, fiercely independent musician and director. Loves yellow, hates explanation, makes everything a world.",
@@ -175,10 +231,8 @@ export const characters: Character[] = [
     id: "ariana",
     name: "Ariana Grande",
     handle: "@ArianaGrande",
-    avatar:
-      "https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=400&q=80",
-    banner:
-      "https://images.unsplash.com/photo-1495805442109-bf1cf975750b?auto=format&fit=crop&w=1200&q=80",
+    avatar: ARIANA_IMG,
+    banner: ARIANA_IMG,
     bio: "singer, songwriter, and actress 🌙 whistle note enthusiast",
     description:
       "Pop-and-R&B powerhouse, ponytail icon, careful with her circle, ferocious with her catalog.",
@@ -195,10 +249,8 @@ export const characters: Character[] = [
     id: "the-weeknd",
     name: "The Weeknd",
     handle: "@theweeknd",
-    avatar:
-      "https://images.unsplash.com/photo-1492447166138-50c3889fccb1?auto=format&fit=crop&w=400&q=80",
-    banner:
-      "https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1200&q=80",
+    avatar: WEEKND_IMG,
+    banner: WEEKND_IMG,
     bio: "after hours, always",
     description:
       "Falsetto in a black coat. Records in the dark, sells out stadiums, says less than the lyrics already do.",
@@ -213,62 +265,33 @@ export const characters: Character[] = [
   },
 ];
 
+// Round 1.11.32 Faza C — Outlet pool trimmed to the THREE real verified
+// media properties. The earlier hyphen-id entries (stannery-vessel,
+// sonic-spectrum, vintage-vibes-only, chartwatcher) were dead code — never
+// referenced anywhere in the app — and only existed alongside their
+// underscore-id twins in anonymousFans. Trimming them removes ~4 wasted
+// asset slots and aligns the outlet pool with the user's local-file mapping.
 export const outletCharacters: Outlet[] = [
   {
     id: "pop-craze",
     name: "Pop Craze",
     handle: "@PopCraze",
-    avatar:
-      "https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?auto=format&fit=crop&w=400&q=80",
+    avatar: POPCRAZE_IMG,
     verified: true,
   },
   {
     id: "ny-minute",
     name: "New York Minute",
     handle: "@nyminute",
-    avatar:
-      "https://images.unsplash.com/photo-1504711434969-e33886168f5c?auto=format&fit=crop&w=400&q=80",
+    avatar: NYMINUTE_IMG,
     verified: true,
   },
   {
     id: "bspn",
     name: "BSPN",
     handle: "@bspn",
-    avatar:
-      "https://images.unsplash.com/photo-1505740420928-5e560c06d30e?auto=format&fit=crop&w=400&q=80",
+    avatar: BSPN_IMG,
     verified: true,
-  },
-  {
-    id: "stannery-vessel",
-    name: "stannery_vessel",
-    handle: "@stannery_vessel",
-    avatar:
-      "https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?auto=format&fit=crop&w=400&q=80",
-    verified: false,
-  },
-  {
-    id: "sonic-spectrum",
-    name: "sonic_spectrum",
-    handle: "@sonic_spectrum",
-    avatar:
-      "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?auto=format&fit=crop&w=400&q=80",
-    verified: false,
-  },
-  {
-    id: "vintage-vibes-only",
-    name: "vintage_vibes_only",
-    handle: "@vintage_vibes_only",
-    avatar:
-      "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=400&q=80",
-    verified: false,
-  },
-  {
-    id: "chartwatcher",
-    name: "chartwatcher_26",
-    handle: "@chartwatcher_26",
-    avatar:
-      "https://images.unsplash.com/photo-1521119989659-a83eee488004?auto=format&fit=crop&w=400&q=80",
-    verified: false,
   },
 ];
 
@@ -372,16 +395,58 @@ export const starterPosts: FeedPost[] = [
   },
 ];
 
-// Anonymous fan/stan accounts. Used by AI prompt to flesh out the crowd of replies.
-export const anonymousFans: Outlet[] = [
-  { id: "stannery_vessel", name: "stannery_vessel", handle: "@stannery_vessel", avatar: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=300&q=80", verified: false },
-  { id: "lofi_lover99", name: "lofi_lover99", handle: "@lofi_lover99", avatar: "https://images.unsplash.com/photo-1531123897727-8f129e1688ce?auto=format&fit=crop&w=300&q=80", verified: false },
-  { id: "sonic_spectrum", name: "sonic_spectrum", handle: "@sonic_spectrum", avatar: "https://images.unsplash.com/photo-1438761681033-6461ffad8d80?auto=format&fit=crop&w=300&q=80", verified: false },
-  { id: "vintage_vibes_only", name: "vintage_vibes_only", handle: "@vintage_vibes_only", avatar: "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=300&q=80", verified: false },
-  { id: "chartwatcher_26", name: "chartwatcher_26", handle: "@chartwatcher_26", avatar: "https://images.unsplash.com/photo-1521119989659-a83eee488004?auto=format&fit=crop&w=300&q=80", verified: false },
-  { id: "fanatic_flora", name: "fanatic_flora", handle: "@fanatic_flora", avatar: "https://images.unsplash.com/photo-1503104834685-7205e8607eb9?auto=format&fit=crop&w=300&q=80", verified: false },
-  { id: "pop_panel_2024", name: "pop_panel_2024", handle: "@pop_panel_2024", avatar: "https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?auto=format&fit=crop&w=300&q=80", verified: false },
+// Round 1.11.32 Faza C — Anonymous fan / stan accounts expanded to 30,
+// matching the 30-image local asset pack (fan_1.jpg … fan_30.jpg). The
+// flavor-handle bank below provides organic-sounding usernames; each
+// fan's entry pairs index i with FAN_IMGS[i], so the visual ↔ handle
+// mapping is stable across sessions and identical on every device.
+//
+// The handle bank is intentionally larger than 30 to leave room for
+// reshuffles in future rounds without shifting the index alignment.
+// Pick policy: first 30 entries, top-to-bottom — drop a new asset at
+// fan_31.jpg and append a 31st bank entry to extend.
+const FAN_HANDLE_BANK: ReadonlyArray<string> = [
+  "stannery_vessel",
+  "lofi_lover99",
+  "sonic_spectrum",
+  "vintage_vibes_only",
+  "chartwatcher_26",
+  "fanatic_flora",
+  "pop_panel_2024",
+  "midnight_mixtape",
+  "starlit_critic",
+  "neon_drift",
+  "fervor_factory",
+  "echo_pixel",
+  "tour_archivist",
+  "pop_telegraph",
+  "stan_command",
+  "queue_keeper",
+  "feed_oracle",
+  "bridge_anthem",
+  "ghost_chorus",
+  "loudcore_diaries",
+  "afterparty_owl",
+  "scene_dispatch",
+  "rave_relay",
+  "encore_intel",
+  "fan_feedback_inc",
+  "soft_screamer",
+  "cult_of_drops",
+  "headphone_witness",
+  "static_pulse",
+  "verse_keeper",
 ];
+
+export const anonymousFans: Outlet[] = FAN_HANDLE_BANK.slice(0, FAN_IMGS.length).map(
+  (handle, i) => ({
+    id: handle,
+    name: handle,
+    handle: `@${handle}`,
+    avatar: FAN_IMGS[i],
+    verified: false,
+  }),
+);
 
 export const anonymousFanIds = anonymousFans.map((f) => f.id);
 

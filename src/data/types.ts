@@ -1,5 +1,16 @@
 export type Provider = "openai" | "anthropic" | "gemini";
 
+// Round 1.11.32 Faza C — image source widening. The migration to local
+// bundled assets means avatar / banner fields now hold one of TWO shapes:
+//   * `number` — the opaque handle returned by Metro's `require()` for
+//     a static asset (e.g. require("../../assets/images/characters/sabrina_carpenter.webp"))
+//   * `string` — a remote URI used for player-uploaded photos (expo-image-picker
+//     returns a file:// URI), AI-generated overrides, and any legacy save
+//     entries that haven't migrated yet.
+// The `imageSource(s)` helper in primitives.tsx normalises both into the
+// shape expo-image's <Image source={...} /> expects.
+export type AvatarSource = string | number;
+
 export type GamePhase =
   | "landing"
   | "hub"
@@ -24,8 +35,8 @@ export type Character = {
   id: string;
   name: string;
   handle: string;
-  avatar: string;
-  banner: string;
+  avatar: AvatarSource;
+  banner: AvatarSource;
   bio: string;
   description?: string;
   followers: number;
@@ -39,7 +50,7 @@ export type Outlet = {
   id: string;
   name: string;
   handle: string;
-  avatar: string;
+  avatar: AvatarSource;
   verified?: boolean;
 };
 
@@ -130,8 +141,8 @@ export type ContactState = {
 export type PlayerProfile = {
   name: string;
   handle: string;
-  avatar: string;
-  banner: string;
+  avatar: AvatarSource;
+  banner: AvatarSource;
   bio: string;
   description: string;
   provider: Provider;
@@ -278,7 +289,7 @@ export type GameState = {
   activeChatId: string | null; // deep-link target for the Messages tab
   characterOverrides: Record<
     string,
-    { avatar?: string; banner?: string; name?: string; handle?: string; bio?: string; description?: string }
+    { avatar?: AvatarSource; banner?: AvatarSource; name?: string; handle?: string; bio?: string; description?: string }
   >;
   // Persistent identity registry for fan/stan accounts that surface in
   // the feed or reply threads. When the AI hallucinates a new fan handle
@@ -290,7 +301,7 @@ export type GameState = {
   // toxic-raid mechanics, where persistent fan identities matter.
   fanIdentityCache: Record<
     string,
-    { avatar: string; name: string; handle: string }
+    { avatar: AvatarSource; name: string; handle: string }
   >;
   editingCharacterId: string | null;
   eventOpen: boolean;
