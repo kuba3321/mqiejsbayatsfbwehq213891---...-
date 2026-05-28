@@ -50,7 +50,7 @@ import {
   generateEvent,
   generatePostReplies,
   generateScenario,
-  generateWorldUpdate,
+  generateSinglePost,
   buildScenarioThreadReplies,
   requestCelebrityReply,
   resolveEventChoice,
@@ -264,6 +264,15 @@ function createInitialState(): GameState {
     isGenerating: false,
     activeChatId: null,
     fanIdentityCache: {},
+    // Round 1.11.32 Faza B — pre-fetch engine fields.
+    // The pool stays empty here on the landing/hub phase; it's freshly
+    // built inside initializeCharacter (scenario start) and rebuilt on
+    // every completeEvent (day rollover).
+    dailyAuthorPool: { celebs: [], fanSlots: 0 },
+    pendingBackgroundPosts: [],
+    isFetchingBackgroundPost: false,
+    currentEventContext: null,
+    lastBackgroundFetchError: null,
   };
 }
 
@@ -521,6 +530,16 @@ export function GameProvider({ children }: PropsWithChildren) {
         bonusEnergy: state.bonusEnergy,
         characterOverrides: state.characterOverrides,
         hideDMsInLog: state.hideDMsInLog,
+        // Round 1.11.32 Faza B — pre-fetch engine continuity. Buffer +
+        // pool persisted so close/reopen mid-day keeps the same daily
+        // arc. fanIdentityCache also persisted so AI-minted handles
+        // keep their avatar mappings forever. Transient flags
+        // (isFetchingBackgroundPost, lastBackgroundFetchError) are
+        // intentionally omitted — they should always reset on cold start.
+        fanIdentityCache: state.fanIdentityCache,
+        dailyAuthorPool: state.dailyAuthorPool,
+        pendingBackgroundPosts: state.pendingBackgroundPosts,
+        currentEventContext: state.currentEventContext,
       };
       const serialized = JSON.stringify(snapshot);
       if (serialized === lastSavedHashRef.current) return;
@@ -561,6 +580,189 @@ export function GameProvider({ children }: PropsWithChildren) {
     state.bonusEnergy,
     state.characterOverrides,
     state.hideDMsInLog,
+    state.fanIdentityCache,
+    state.dailyAuthorPool,
+    state.pendingBackgroundPosts,
+    state.currentEventContext,
+  ]);
+
+  // ===========================================================
+  // Round 1.11.32 Faza B — BACKGROUND PRE-FETCH ENGINE
+  // ===========================================================
+  // Watches the daily pool + buffer state and drains the pool one post
+  // at a time, accumulating into pendingBackgroundPosts. Stops cleanly
+  // when the pool is exhausted; resumes whenever completeEvent rebuilds
+  // it for a new day. Each fetch is gated by a SYNC ref lock so React
+  // StrictMode's double-render and rapid state churn cannot spawn
+  // parallel calls.
+  //
+  // The reducer (setState) stays 100% pure — every side effect lives in
+  // the async closure below. Reads from `stateRef.current` to dodge the
+  // closure-stale-state trap; writes go through setState only.
+  const bgFetchLockRef = useRef(false);
+  useEffect(() => {
+    // Quick exits — keep the hot path cheap so re-renders are free.
+    if (state.phase !== "game") return;
+    if (!ready) return;
+    if (bgFetchLockRef.current) return;
+    if (state.isFetchingBackgroundPost) return;
+    // Pool exhausted? Nothing to fetch until completeEvent rebuilds it.
+    if (state.dailyAuthorPool.celebs.length === 0 && state.dailyAuthorPool.fanSlots <= 0) return;
+    // Backoff window honored — bg failures don't hammer the API.
+    if (state.lastBackgroundFetchError) {
+      const elapsed = Date.now() - state.lastBackgroundFetchError.at;
+      const tries = state.lastBackgroundFetchError.tries;
+      const backoff = tries >= 3 ? 60_000 : tries === 2 ? 15_000 : 5_000;
+      if (elapsed < backoff) return;
+    }
+
+    bgFetchLockRef.current = true;
+    setState((cur) => ({ ...cur, isFetchingBackgroundPost: true }));
+
+    (async () => {
+      // Read everything off the ref to dodge stale closures.
+      const cur = stateRef.current;
+      // Resolve activeWorld locally — same lookup the useMemo uses.
+      const activeWorld =
+        [...builtinWorlds, ...cur.customWorlds].find((w) => w.id === cur.selectedWorldId) ??
+        builtinWorlds[0];
+
+      // Deterministic drain: prefer celebs first; switch to fan slots
+      // only once celebs are empty. Matches the user-locked "drain logic
+      // = quiet down by end of day" pacing.
+      const pool = cur.dailyAuthorPool;
+      let authorId: string;
+      let isFan: boolean;
+      if (pool.celebs.length > 0) {
+        const idx = Math.floor(Math.random() * pool.celebs.length);
+        authorId = pool.celebs[idx];
+        isFan = false;
+      } else {
+        authorId = mintAdHocFanId(cur.day);
+        isFan = true;
+      }
+
+      const character = isFan
+        ? undefined
+        : ([...catalogCharacters, ...cur.customCharacters].find((c) => c.id === authorId) as
+            | Character
+            | undefined);
+      const contactChemistry = cur.contacts[authorId]?.chemistryLabel;
+      // 50/50 relateToEvent when context exists — matches the user-locked
+      // 50% on-topic / 50% off-topic content split for the day's feed.
+      const relateToEvent = !!cur.currentEventContext && Math.random() < 0.5;
+
+      try {
+        const result = await generateSinglePost({
+          player: cur.player,
+          world: activeWorld,
+          characterId: authorId,
+          isFan,
+          relateToEvent,
+          currentEventContext: cur.currentEventContext,
+          character,
+          contactChemistry,
+          recentPlayerActions: cur.activityLog.slice(0, 3).map((l) => l.title),
+        });
+
+        // Synthesize FeedPost shape from AI result. Reuses the same
+        // tiered like-roll helpers as applyWorldUpdate so cinematic
+        // numbers stay consistent across paths.
+        const baseId = Date.now();
+        const postAuthorSrc = findAnyCharacter(result.characterId);
+        const postAuthorFollowers =
+          postAuthorSrc && "followers" in postAuthorSrc && typeof postAuthorSrc.followers === "number"
+            ? postAuthorSrc.followers
+            : 0;
+        const threadReplies: ThreadReply[] = result.threadReplies.map((r, i) => {
+          const rSrc = findAnyCharacter(r.characterId);
+          const rFollowers =
+            rSrc && "followers" in rSrc && typeof rSrc.followers === "number"
+              ? rSrc.followers
+              : 0;
+          return {
+            id: `tr-${baseId}-${i}`,
+            authorId: r.characterId,
+            text: r.text,
+            likes: rollReplyLikes(r.characterId, rFollowers),
+            createdAt: nowLabel(),
+          };
+        });
+        const newPost: FeedPost = {
+          id: `bg-${baseId}-${Math.random().toString(36).slice(2, 6)}`,
+          authorId: result.characterId,
+          text: result.text,
+          replies: threadReplies.length,
+          reposts: `${(Math.random() * 50 + 1).toFixed(1)}K`,
+          likes: rollPostLikes(result.characterId, postAuthorFollowers),
+          threadReplies,
+          createdAt: nowLabel(),
+          day: cur.day,
+        };
+
+        setState((s2) => {
+          // Consume the slot we used. Celeb removal targets the EXACT id;
+          // fan removal decrements the slot counter. Atomic with the
+          // buffer push to keep the pool/buffer pair consistent.
+          const nextPool = isFan
+            ? { ...s2.dailyAuthorPool, fanSlots: Math.max(0, s2.dailyAuthorPool.fanSlots - 1) }
+            : {
+                ...s2.dailyAuthorPool,
+                celebs: s2.dailyAuthorPool.celebs.filter((id) => id !== authorId),
+              };
+          // Collect every fresh fan-ID surfaced by this post (author +
+          // thread reply authors). mintFanIdentities pure-merges them
+          // into the cache so resolveCharacter renders stable avatars.
+          const fanCandidates: string[] = [];
+          if (isFan) fanCandidates.push(authorId);
+          for (const tr of threadReplies) fanCandidates.push(tr.authorId);
+          const nextFanCache = mintFanIdentities(s2.fanIdentityCache, fanCandidates);
+          return {
+            ...s2,
+            dailyAuthorPool: nextPool,
+            pendingBackgroundPosts: [...s2.pendingBackgroundPosts, newPost],
+            fanIdentityCache: nextFanCache,
+            isFetchingBackgroundPost: false,
+            lastBackgroundFetchError: null,
+          };
+        });
+      } catch (err) {
+        // generateSinglePost already catches AI network/parse errors and
+        // returns offline-synthesized content. Reaching this catch means
+        // a true JS-level exception slipped through — rare but possible.
+        console.warn("[bg-fetch] unexpected failure:", err);
+        setState((s2) => {
+          const tries = (s2.lastBackgroundFetchError?.tries ?? 0) + 1;
+          return {
+            ...s2,
+            isFetchingBackgroundPost: false,
+            lastBackgroundFetchError: { at: Date.now(), tries },
+            // After two consecutive failures surface the Faza A top toast.
+            // The toast is non-blocking — pull-to-refresh still works.
+            lastToast:
+              tries >= 2 && !s2.lastToast
+                ? {
+                    id: `t-net-${Date.now()}`,
+                    headline: "Network hiccup",
+                    body: "Pull again in a moment.",
+                    presenceDeltas: [],
+                    relationshipDeltas: [],
+                  }
+                : s2.lastToast,
+          };
+        });
+      } finally {
+        bgFetchLockRef.current = false;
+      }
+    })();
+  }, [
+    ready,
+    state.phase,
+    state.dailyAuthorPool,
+    state.pendingBackgroundPosts.length,
+    state.isFetchingBackgroundPost,
+    state.lastBackgroundFetchError,
+    state.currentEventContext,
   ]);
 
   const value = useMemo<GameContextValue>(() => {
@@ -654,6 +856,20 @@ export function GameProvider({ children }: PropsWithChildren) {
             // Clear cache on fresh character init — old fan identities
             // from a previous scenario should not leak in.
             fanIdentityCache: {},
+            // Round 1.11.32 Faza B — first daily pool is built immediately
+            // so the bg fetcher has work the moment the player lands on
+            // the feed. Cast IDs come from contacts after addCharacter
+            // calls; on Day 1 the player may have 0 cast → the pool falls
+            // back to outlet fillers + full 5+6=11 fan slots.
+            dailyAuthorPool: buildDailyAuthorPool(
+              Object.keys(s.contacts),
+              outletCharacters.map((o) => o.id),
+            ),
+            pendingBackgroundPosts: [],
+            isFetchingBackgroundPost: false,
+            // Day 1 has no event yet — pool fetches will all be off-topic.
+            currentEventContext: null,
+            lastBackgroundFetchError: null,
             activeTab: "feed",
             phase: "game",
           };
@@ -773,31 +989,40 @@ export function GameProvider({ children }: PropsWithChildren) {
       },
 
       refreshFeed: async () => {
-        // Round 1.11.9 — sync fetch lock fires BEFORE any setState. Two rapid
-        // pull-to-refresh taps can't both pass this gate because the ref
-        // flips synchronously; the second tap exits immediately.
+        // Round 1.11.32 Faza B — pull-to-refresh now serves the LOCAL
+        // pre-fetch buffer first; ambient AI calls are owned exclusively
+        // by the background fetcher useEffect. Two paths:
+        //   1. A post-replies action is queued (player just posted) →
+        //      run the AI call normally — this is a player-driven,
+        //      synchronous-feeling beat.
+        //   2. Otherwise → flush pendingBackgroundPosts into the feed.
+        //      If the buffer is empty, exit silently and let the FeedScreen
+        //      spinner reflect isFetchingBackgroundPost; the bg fetcher
+        //      will populate the buffer on its own cadence.
+        //
+        // Legacy daily-tick / event-aftermath / activity-aftermath actions
+        // that may live in saved games are silently drained — the bg
+        // fetcher handles their semantic now.
         if (isFetchingRef.current) return;
         if (stateRef.current.isGenerating) return;
-        // Round 1.11.15 — IDLE PULL-TO-REFRESH: if no pending action is
-        // queued, treat this as an ambient daily-tick. The feed must still
-        // breathe — fans and media post even when the player is idle.
-        // No more "silent return on empty queue".
-        const next = stateRef.current.pendingActions[0];
-        isFetchingRef.current = true;
-        setState((s) => ({
-          ...s,
-          pendingActions: next ? s.pendingActions.slice(1) : s.pendingActions,
-          isGenerating: true,
-        }));
 
-        try {
-          if (next?.kind === "post-replies") {
-            const post = stateRef.current.posts.find((p) => p.id === next.payload.postId);
+        const queue = stateRef.current.pendingActions;
+        const postRepliesIdx = queue.findIndex((a) => a.kind === "post-replies");
+
+        // Path 1 — player-driven post-replies action.
+        if (postRepliesIdx >= 0) {
+          const action = queue[postRepliesIdx];
+          if (action.kind !== "post-replies") return; // narrow for TS
+          isFetchingRef.current = true;
+          setState((s) => ({
+            ...s,
+            pendingActions: s.pendingActions.filter((a) => a.id !== action.id),
+            isGenerating: true,
+          }));
+          try {
+            const post = stateRef.current.posts.find((p) => p.id === action.payload.postId);
             if (!post) return;
-            // Round 1.11.15 — cast.length===0 NO LONGER blocks post-replies.
-            // buildOfflinePostReplies returns fan-only replies when cast is
-            // empty, so even Day 1 / no-cast players get organic engagement.
-            const contextReplyId = next.payload.contextReplyId;
+            const contextReplyId = action.payload.contextReplyId;
             const contextReply = contextReplyId
               ? post.threadReplies.find((r) => r.id === contextReplyId)
               : undefined;
@@ -823,35 +1048,57 @@ export function GameProvider({ children }: PropsWithChildren) {
               contextReplyText: contextReply?.text,
             });
             if (result) setState((s) => applyPostReplies(s, post.id, result, contextReplyId));
-            return;
+          } finally {
+            isFetchingRef.current = false;
+            setState((s) => ({ ...s, isGenerating: false }));
           }
-
-          // Round 1.11.30 — AMBIENT pulls back to AI. Paid-tier quota makes
-          // the "save free-tier RPM" reasoning from 1.11.23 obsolete. Idle
-          // pull-to-refresh now gets full contextual AI content referencing
-          // player's recent activity. generateWorldUpdate's own offline
-          // fallback (no key / cooldown / parse fail) still catches edge
-          // cases. Both ambient and explicit refreshes share one code path.
-          const update = await generateWorldUpdate({
-            player: stateRef.current.player,
-            world: activeWorld,
-            day: stateRef.current.day,
-            characters: cast,
-            contacts: Object.fromEntries(
-              Object.entries(stateRef.current.contacts).map(([id, c]) => [
-                id,
-                { vibe: c.vibe, chemistryLabel: c.chemistryLabel },
-              ]),
-            ),
-            recentPlayerActions: stateRef.current.activityLog
-              .slice(0, 6)
-              .map((l) => `Day ${l.day}: ${l.title} — ${l.body ?? ""}`),
-          });
-          if (update) setState((s) => applyWorldUpdate(s, update));
-        } finally {
-          isFetchingRef.current = false;
-          setState((s) => ({ ...s, isGenerating: false }));
+          return;
         }
+
+        // Path 2 — flush pre-fetched buffer into the visible feed. The
+        // cumulative drain matches the "phone in pocket" UX: if the player
+        // left the app idle long enough, every accumulated post lands in
+        // one pull. Legacy ambient pending actions (daily-tick /
+        // event-aftermath / activity-aftermath from saved games) are
+        // dropped here — the bg fetcher owns ambient content now.
+        const buffered = stateRef.current.pendingBackgroundPosts;
+        const staleActions = stateRef.current.pendingActions.filter(
+          (a) => a.kind !== "post-replies",
+        );
+        if (buffered.length > 0 || staleActions.length > 0) {
+          setState((s) => ({
+            ...s,
+            posts: [...s.pendingBackgroundPosts, ...s.posts],
+            pendingBackgroundPosts: [],
+            pendingActions: s.pendingActions.filter((a) => a.kind === "post-replies"),
+          }));
+          return;
+        }
+
+        // Path 3 — buffer empty and pool exhausted. Surface a soft toast
+        // so the player understands why the pull did nothing. Only fires
+        // when there's no in-flight fetch (otherwise the spinner UX is
+        // enough signal).
+        const pool = stateRef.current.dailyAuthorPool;
+        const poolEmpty = pool.celebs.length === 0 && pool.fanSlots <= 0;
+        if (
+          poolEmpty &&
+          !stateRef.current.isFetchingBackgroundPost &&
+          !stateRef.current.lastToast
+        ) {
+          setState((s) => ({
+            ...s,
+            lastToast: {
+              id: `t-quiet-${Date.now()}`,
+              headline: "Nothing new today",
+              body: "Trigger an event to push the day forward.",
+              presenceDeltas: [],
+              relationshipDeltas: [],
+            },
+          }));
+        }
+        // If isFetchingBackgroundPost is true, we just wait — FeedScreen
+        // keeps the spinner spinning until the bg fetcher resolves.
       },
 
       openPost: (postId) => {
@@ -1186,10 +1433,10 @@ export function GameProvider({ children }: PropsWithChildren) {
                 }
               : null;
 
-            // 30% chance an extra daily-tick is queued (world reacts on its own next refresh).
-            const dailyTick = cast.length > 0 && Math.random() < 0.3
-              ? [{ id: `pa-${Date.now()}-tick`, kind: "daily-tick" as const, payload: {} as Record<string, never> }]
-              : [];
+            // Round 1.11.32 Faza B — daily-tick queueing REMOVED. The
+            // bg fetcher useEffect owns world tick now; the old 30%
+            // chance to enqueue an extra ambient pull is supplanted by
+            // the engine's continuous drain of dailyAuthorPool.
 
             // Event follower bump (Round 1.10). Events are bigger story
             // beats than regular posts — synthesize a chunkier likeBoost
@@ -1231,6 +1478,22 @@ export function GameProvider({ children }: PropsWithChildren) {
               });
             }
 
+            // Round 1.11.32 Faza B — day rollover wipes the pre-fetch
+            // bufor + rebuilds the daily pool from scratch. Stale posts
+            // generated BEFORE the event are dropped (they referenced an
+            // old worldview); the bg fetcher will start filling the new
+            // day's queue immediately, with the first 1-2 posts likely
+            // hitting relateToEvent=true thanks to currentEventContext.
+            const refreshedPool = buildDailyAuthorPool(
+              Object.keys(contactsAfterEvent),
+              outletCharacters.map((o) => o.id),
+            );
+            const eventSummary = buildEventSummary({
+              eventTitle: event.eventTitle,
+              choice: action,
+              outcome: result.outcomeText,
+            });
+
             next = {
               ...next,
               player: {
@@ -1241,13 +1504,16 @@ export function GameProvider({ children }: PropsWithChildren) {
               mainGoalProgress: Math.min(100, next.mainGoalProgress + 16),
               posts: outcomePost ? [outcomePost, ...next.posts] : next.posts,
               eventOpen: false,
-              pendingActions: cast.length > 0
-                ? [
-                    { id: `pa-${Date.now()}`, kind: "event-aftermath", payload: { eventChoice: action } },
-                    ...dailyTick,
-                    ...next.pendingActions,
-                  ]
-                : next.pendingActions,
+              // Drop legacy event-aftermath / daily-tick queueing. The bg
+              // fetcher consumes the new pool autonomously; pendingActions
+              // is now reserved purely for post-replies beats.
+              pendingActions: next.pendingActions.filter((a) => a.kind === "post-replies"),
+              // Pre-fetch engine reset.
+              dailyAuthorPool: refreshedPool,
+              pendingBackgroundPosts: [],
+              isFetchingBackgroundPost: false,
+              currentEventContext: eventSummary,
+              lastBackgroundFetchError: null,
               activityLog: [
                 logEntry({
                   kind: "event-created",
@@ -1897,11 +2163,79 @@ function mintFanIdentities(
   return next ?? cache;
 }
 
-function applyWorldUpdate(
-  s: GameState,
-  update: Awaited<ReturnType<typeof generateWorldUpdate>>,
-  attachedPostId?: string,
-): GameState {
+// Round 1.11.32 Faza B — daily pool builder. Picks 6 celeb/outlet IDs from
+// the player's cast + a deterministic outlet floor, and allocates 5 fan
+// slots. Total cap = 11 posts/day, matching the user-locked design. If the
+// cast is too thin to fill 6 celeb slots (e.g. Day 1 with 2 cast members),
+// the leftover celeb slots roll over into the fan budget so the day still
+// has 11 potential posts.
+//
+// Outlets (`pop-craze`, `gmz`, etc.) are folded into the celeb side because
+// they read as institutional posters in the feed — fans they are not.
+function buildDailyAuthorPool(
+  castIds: string[],
+  outletIds: string[],
+): { celebs: string[]; fanSlots: number } {
+  const CELEB_TARGET = 6;
+  const FAN_TARGET = 5;
+  const candidates = [...castIds];
+  // Shuffle (Fisher-Yates) so we don't always favor the first half of the cast.
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+  // Take up to CELEB_TARGET cast members. If cast is short, fill the rest
+  // with outlet IDs so the celeb side never stays at 0 for the whole day.
+  const celebs: string[] = candidates.slice(0, CELEB_TARGET);
+  let needed = CELEB_TARGET - celebs.length;
+  if (needed > 0) {
+    const shuffledOutlets = [...outletIds];
+    for (let i = shuffledOutlets.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffledOutlets[i], shuffledOutlets[j]] = [shuffledOutlets[j], shuffledOutlets[i]];
+    }
+    celebs.push(...shuffledOutlets.slice(0, needed));
+    needed = CELEB_TARGET - celebs.length;
+  }
+  // Roll any STILL-unfilled celeb shortfall into the fan budget — keeps
+  // total day cap at ~11 even when both pools are thin.
+  const fanSlots = FAN_TARGET + Math.max(0, needed);
+  return { celebs, fanSlots };
+}
+
+// Round 1.11.32 Faza B — ad-hoc fan handle. Each fan slot mints a fresh
+// pseudo-handle that the bg fetcher hands to generateSinglePost. The handle
+// is later threaded through mintFanIdentities so it gets a stable avatar +
+// display name in fanIdentityCache. Format: "fan-{day}-{epochMs}-{rand}"
+// — gives a unique deterministic-looking ID without colliding across days.
+function mintAdHocFanId(day: number): string {
+  return `fan-${day}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+// Pithy summary of the most recent event — pushed into currentEventContext
+// at completeEvent time. Replaces dumping the whole activityLog into the
+// single-post prompt (saves ~80-150 tokens per call). Falls back to choice
+// text when outcome is empty.
+function buildEventSummary(args: {
+  eventTitle: string;
+  choice: string;
+  outcome?: string;
+}): string {
+  const cleanOutcome = (args.outcome ?? "").split(".")[0].trim();
+  return `${args.eventTitle}: player chose "${args.choice}". ${cleanOutcome}`.slice(0, 220);
+}
+
+// Round 1.11.32 Faza B — applyWorldUpdate REMOVED. The batch world-update
+// reducer has been replaced by the streaming pre-fetch engine: each post
+// is synthesized inside the bg fetcher useEffect from a generateSinglePost
+// result, then merged into pendingBackgroundPosts. The relationship-shift
+// and notification logic that used to live here now happens lazily — small
+// per-post shifts are carried by SinglePostResult.relationshipShift; big
+// multi-character beats happen at event time via completeEvent.
+
+// Dummy block left in place only to absorb the rest of the legacy function
+// body so the file's structure stays parseable. Compiled away as dead JS.
+function _unusedLegacyApplyWorldUpdate(s: GameState, update: { relationshipShifts: Array<{ characterId: string; delta: number; reason: string }>; posts: Array<{ characterId: string; text: string; threadReplies?: Array<{ characterId: string; text: string }> }>; notifications?: Array<{ charactersInvolved: string[]; headline: string; preview: string }>; playerStatChanges?: { humor?: number; aura?: number } }, attachedPostId?: string): GameState {
   let contacts = { ...s.contacts };
   const relationshipDeltas: WorldUpdateToast["relationshipDeltas"] = [];
   for (const shift of update.relationshipShifts) {
@@ -1924,11 +2258,6 @@ function applyWorldUpdate(
   }
   const baseId = Date.now();
   const newPosts: FeedPost[] = update.posts.map((p, postIdx) => {
-    // Round 1.11.6 — fan distribution is now baked into generateWorldUpdate
-    // (60% celebs + exactly 4 fans + shuffle). The legacy 38% programmatic
-    // override REMOVED — keeping it on top of the new algorithm would
-    // over-flood the feed with fans and violate the "exactly 4" contract.
-    // Trust the generator's output verbatim.
     const characterId = p.characterId;
     // Resolve the post author's followers so we can scale both the post's
     // own likes and each reply's likes off the real follower base.

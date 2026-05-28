@@ -892,16 +892,18 @@ function EnergyBadge() {
 function FeedScreen() {
   const { state, setComposeOpen, triggerEvent, refreshFeed, eventXpRange } = useGame();
   const [refreshing, setRefreshing] = useState(false);
+  // Round 1.11.32 Faza B — Opcja Y: if the player pulls while the local
+  // buffer is empty AND a background fetch is in flight, we keep the
+  // spinner spinning instead of bouncing back instantly. The state below
+  // tracks "pull is waiting for the bg fetcher to resolve"; the useEffect
+  // a few lines down auto-drains the resulting post and clears the
+  // spinner once the bg fetch completes.
+  const [waitingForBg, setWaitingForBg] = useState(false);
   const xpRange = eventXpRange(state.level);
 
-  // Round 1.11.19 — UI no longer gates refreshFeed() on a non-empty
-  // pendingActions queue. game-context.tsx (since 1.11.15) decides
-  // autonomously between consuming the queue head and firing an ambient
-  // daily-tick when the queue is empty. The old hasPending gate here was
-  // a left-over from Round 1.8 "quiet refresh" and made the entire
-  // ambient pipeline unreachable from the UI — a layered regression.
   async function onRefresh() {
     setRefreshing(true);
+    const bufferWasEmpty = state.pendingBackgroundPosts.length === 0;
     try {
       await refreshFeed();
     } catch (error) {
@@ -911,7 +913,30 @@ function FeedScreen() {
     } finally {
       setRefreshing(false);
     }
+    // If the pull happened before the bg fetcher had anything to hand
+    // over, keep the spinner "armed" via waitingForBg until the bg fetch
+    // resolves — Opcja Y. The useEffect below clears it.
+    if (bufferWasEmpty && state.isFetchingBackgroundPost) {
+      setWaitingForBg(true);
+    }
   }
+
+  // Auto-drain when the bg fetch resolves while we were waiting. If it
+  // produced a post we flush the buffer to the feed immediately; either
+  // way the spinner clears.
+  useEffect(() => {
+    if (!waitingForBg) return;
+    if (state.isFetchingBackgroundPost) return;
+    if (state.pendingBackgroundPosts.length > 0) {
+      void refreshFeed();
+    }
+    setWaitingForBg(false);
+  }, [
+    waitingForBg,
+    state.isFetchingBackgroundPost,
+    state.pendingBackgroundPosts.length,
+    refreshFeed,
+  ]);
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
@@ -920,7 +945,11 @@ function FeedScreen() {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 200 }}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.blue} />
+          <RefreshControl
+            refreshing={refreshing || (waitingForBg && state.isFetchingBackgroundPost)}
+            onRefresh={onRefresh}
+            tintColor={colors.blue}
+          />
         }
       >
         {state.posts.map((post, index) => (

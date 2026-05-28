@@ -305,4 +305,37 @@ export type GameState = {
   createActivityOpen: boolean;
   hideDMsInLog: boolean;
   lastToast: WorldUpdateToast | null;
+
+  // ===== Round 1.11.32 Faza B — Pre-fetching feed engine =====
+  // Replaces the legacy batch generateWorldUpdate model with a streaming
+  // one. Each day the engine builds a fixed pool of 11 potential authors
+  // (6 celebs/outlets + 5 fan slots) and a background fetcher drains it
+  // one post at a time. Pull-to-refresh consumes the local buffer and
+  // re-arms the fetcher. See game-context.tsx → buildDailyAuthorPool +
+  // background fetch useEffect for the full lifecycle.
+  dailyAuthorPool: {
+    // Concrete celeb/outlet IDs (consumed 1:1, removed on use).
+    celebs: string[];
+    // Numeric fan budget — each slot mints a fresh ad-hoc fan via
+    // mintFanIdentities, so identities stay infinite while the daily
+    // CAP stays finite. Drains to 0 only after celebs are exhausted.
+    fanSlots: number;
+  };
+  // Local accumulating buffer of pre-fetched posts. Empties on every
+  // pull-to-refresh (the entire buffer flushes into the feed at once).
+  // No hard cap — keeps growing until dailyAuthorPool is fully drained,
+  // simulating "phone in pocket" accumulation.
+  pendingBackgroundPosts: FeedPost[];
+  // Telemetry flag for the silent pre-fetch. Drives the FeedScreen
+  // spinner when the player pulls and the buffer is empty (Opcja Y).
+  // SEPARATE from `isGenerating`, which gates user-facing actions.
+  isFetchingBackgroundPost: boolean;
+  // Pithy summary of the most recent event (player choice + outcome).
+  // Replaces pushing the whole activityLog into every single-post prompt
+  // — saves ~80-150 tokens per call. Cleared on next event rollover.
+  currentEventContext: string | null;
+  // Exponential backoff state for background fetch failures. After 2
+  // consecutive failures the WorldUpdateToast surfaces a "Network
+  // hiccup" notice; backoff window grows 5s → 15s → 60s.
+  lastBackgroundFetchError: { at: number; tries: number } | null;
 };

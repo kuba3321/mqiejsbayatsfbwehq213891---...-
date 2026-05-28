@@ -1576,6 +1576,183 @@ Generate 2-4 relationshipShifts, 6-9 posts (mix of cast celebrities at ~60% chan
   return buildOfflineWorldUpdate(args);
 }
 
+// ---------------- Single-post pre-fetch (Round 1.11.32 Faza B) ----------------
+
+export type SinglePostResult = {
+  characterId: string;
+  text: string;
+  threadReplies: Array<{ characterId: string; text: string }>;
+  // Optional micro-shift to one contact when the post is relevant to them
+  // (e.g. an AI-generated Sabrina post that responds to the player's event
+  // choice). Kept tiny — these are background flavor posts, not the heavy
+  // applyWorldUpdate beats.
+  relationshipShift?: { characterId: string; delta: number; reason: string };
+};
+
+// Build an offline-synthesized single post when the network is unreachable
+// or returns malformed JSON. We compose from the same scenario-aware banks
+// used by buildOfflineWorldUpdate so voice stays consistent. The shape
+// always matches a successful AI return.
+function buildOfflineSinglePost(args: {
+  world: World;
+  character: Character | undefined; // for celeb posts; undefined for fan-slot
+  isFan: boolean;
+  fanLineBank: string[];
+  fanCommentBank: string[];
+}): SinglePostResult {
+  if (args.isFan || !args.character) {
+    const fanIds = anonymousFanIds;
+    const author = pickRandom(fanIds);
+    const text = pickRandom(args.fanLineBank);
+    const replyCount = 2 + Math.floor(Math.random() * 3); // 2-4
+    return {
+      characterId: author,
+      text,
+      threadReplies: buildOfflineThreadReplies(fanIds, args.fanCommentBank).slice(0, replyCount),
+    };
+  }
+  // Celeb path — reuse the same template selector buildOfflineWorldUpdate uses.
+  const scenarioBank = scenarioPostTemplates[args.world.id];
+  const charBank = scenarioBank?.[args.character.id];
+  const fallback = scenarioBank?.["default"] ?? [
+    `${args.character.name.split(" ")[0]} dropped something the timeline cannot stop talking about.`,
+    `Whatever ${args.character.name.split(" ")[0]} is doing tonight is rewiring the feed.`,
+  ];
+  const line = pickRandom(charBank && charBank.length > 0 ? charBank : fallback);
+  const replyCount = 3 + Math.floor(Math.random() * 3); // 3-5 (celeb posts pull more)
+  return {
+    characterId: args.character.id,
+    text: line,
+    threadReplies: buildOfflineThreadReplies(anonymousFanIds, args.fanCommentBank).slice(0, replyCount),
+  };
+}
+
+// generateSinglePost — the heart of the Round 1.11.32 Faza B streaming feed.
+// One network call, one finished post, inline threadReplies. Called by the
+// background fetcher in game-context whenever the buffer has room and the
+// dailyAuthorPool has authors left to drain.
+//
+// - `characterId` is pre-selected by the engine (deterministic drain from
+//   the daily pool). The AI does NOT pick — its job is purely voice.
+// - `isFan` flips the prompt persona: celeb-polished vs everyday-user chaos
+//   (lowercase, no punctuation, typos welcome).
+// - `relateToEvent` toggles whether the post should reference the recent
+//   event. When true, `currentEventContext` is folded into the prompt;
+//   when false, the post is off-topic / lifestyle.
+// - On any failure (no key, network, parse error) → buildOfflineSinglePost.
+//   This is the Q4/P3 safety net: the game never stalls because Gemini is
+//   503ing.
+export async function generateSinglePost(args: {
+  player: PlayerProfile;
+  world: World;
+  characterId: string;
+  isFan: boolean;
+  relateToEvent: boolean;
+  currentEventContext: string | null;
+  character?: Character;        // catalog/cast entry; undefined for fan slot
+  contactChemistry?: string;    // chemistry label with player, for celeb voice tuning
+  recentPlayerActions?: string[]; // last 2-3 only — keep prompt small
+}): Promise<SinglePostResult> {
+  const fanLineBank =
+    scenarioFanPostBanks[args.world.id] ?? offlineFanPostBank;
+  const fanCommentBank =
+    scenarioFanCommentBank[args.world.id] ?? offlineFanComments;
+
+  // No-key short-circuit. Saves a network round-trip + keeps Day 1 alive
+  // for players running keyless.
+  if (!args.player.apiKey.trim()) {
+    return buildOfflineSinglePost({
+      world: args.world,
+      character: args.character,
+      isFan: args.isFan,
+      fanLineBank,
+      fanCommentBank,
+    });
+  }
+
+  // Compact prompt. The engine has already done all the selection work —
+  // AI just dresses the voice.
+  const personaBlock = args.isFan
+    ? `You are an ANONYMOUS FAN on a Twitter/X-style feed posting as @${args.characterId}.
+Write like a chaotic everyday user: lowercase, sloppy punctuation, the occasional typo, slang. NO celebrity polish. 1-2 short sentences max. Just a thought, observation, joke, or quote-tweet-style reaction.`
+    : args.character
+      ? `You are roleplaying ${args.character.name} (${args.character.handle}). ${args.character.systemPrompt}
+Chemistry with the player: ${args.contactChemistry ?? "neutral"}. Adjust tone accordingly.
+Write a single in-character 1-2 sentence feed post.`
+      : `You are a verified account posting on a Twitter/X-style feed as @${args.characterId}. Write a single 1-2 sentence in-character feed post.`;
+
+  const eventBlock = args.relateToEvent && args.currentEventContext
+    ? `Recent event the post SHOULD react to: ${args.currentEventContext}`
+    : `Recent event context (DO NOT directly reference — keep this post off-topic / lifestyle): ${args.currentEventContext ?? "(none yet)"}`;
+
+  const recentBlock =
+    args.recentPlayerActions && args.recentPlayerActions.length > 0
+      ? `Last player actions: ${args.recentPlayerActions.slice(-2).join(" | ")}`
+      : "";
+
+  const system = `${personaBlock}
+
+Scenario: ${args.world.title}. ${args.world.setting ?? args.world.description}.
+${eventBlock}
+${recentBlock}
+
+Return STRICT JSON only, no commentary:
+{
+  "text": "<the post text>",
+  "threadReplies": [
+    { "characterId": "<a fan handle from this pool: ${anonymousFanIds.slice(0, 6).join(", ")}>", "text": "<short 1-sentence reaction>" }
+  ],
+  "relationshipShift": null
+}
+
+Generate 3-5 threadReplies for a celeb post, 2-3 for a fan post. Reply authors should mostly be from the fan pool above; one celeb reply is fine if the chemistry justifies it. Keep replies short and chaotic — they're the crowd, not press releases.`;
+
+  try {
+    const text = await runLLM(args.player, {
+      system,
+      messages: [{ role: "user", content: "Generate the post now." }],
+      // Tight budget — one post + ~4 replies fits comfortably under 400
+      // tokens. Stays well below per-minute token caps when the fetcher
+      // runs back-to-back.
+      maxTokens: 500,
+      temperature: 0.9,
+      jsonResponse: true,
+    });
+    const parsed = safeParseJSON(text);
+    if (parsed && typeof parsed.text === "string") {
+      const replies = Array.isArray(parsed.threadReplies)
+        ? (parsed.threadReplies as Array<{ characterId: string; text: string }>).filter(
+            (r) => r && typeof r.text === "string" && typeof r.characterId === "string",
+          )
+        : [];
+      return {
+        characterId: args.characterId,
+        text: parsed.text as string,
+        threadReplies: replies,
+        relationshipShift:
+          parsed.relationshipShift &&
+          typeof parsed.relationshipShift === "object" &&
+          typeof (parsed.relationshipShift as { characterId?: unknown }).characterId === "string"
+            ? (parsed.relationshipShift as SinglePostResult["relationshipShift"])
+            : undefined,
+      };
+    }
+    console.warn(
+      `[ai] generateSinglePost: parse failed (len=${text.length}). Falling back to offline. Tail:`,
+      text.slice(-160),
+    );
+  } catch (err) {
+    console.warn("[ai] generateSinglePost failed, falling back to offline:", err);
+  }
+  return buildOfflineSinglePost({
+    world: args.world,
+    character: args.character,
+    isFan: args.isFan,
+    fanLineBank,
+    fanCommentBank,
+  });
+}
+
 // ---------------- Post replies ----------------
 
 export type PostRepliesResult = {
