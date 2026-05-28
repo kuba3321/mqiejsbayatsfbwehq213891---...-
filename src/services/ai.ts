@@ -1764,9 +1764,25 @@ Return STRICT JSON only, no commentary:
   "text": "<the post text>",
   "threadReplies": [
     { "characterId": "<fan handle OR celeb id from pools above>", "text": "<short 1-sentence reaction>" }
-  ],
-  "relationshipShift": null
+  ]
 }
+
+\`relationshipShift\` rules (CRITICAL — read carefully):
+- OMIT this field entirely (do NOT include the key in the JSON at all) when
+  the post is generic, lifestyle, off-topic, or does not mention/react to any
+  specific celebrity from the cast pool.
+- INCLUDE this field as
+  "relationshipShift": { "characterId": "<exact cast id>", "delta": <number -3..3>, "reason": "<one sentence>" }
+  ONLY when the post organically praises, disses, @-mentions, or reacts to a
+  specific celebrity from the castCelebIds pool above. \`delta\` is HOW this
+  post nudges that celeb's vibe TOWARD THE PLAYER (positive = warmer; negative = colder).
+
+Examples:
+✗ Post: "espresso for dinner again." → omit relationshipShift entirely (no key in JSON)
+✓ Post: "@taylor your new bridge is the only thing keeping me alive" →
+  add "relationshipShift": { "characterId": "taylor", "delta": 1.4, "reason": "Public praise for Taylor's bridge lifts her vibe toward the player." }
+✓ Post: "imagine still doing that ariana what" →
+  add "relationshipShift": { "characterId": "ariana", "delta": -1.8, "reason": "Public dig at Ariana's recent move." }
 
 Generate 3-5 threadReplies for a celeb post, 2-3 for a fan post. Mix authors:
 - ~60-80% from the fan pool — anonymous chaos
@@ -1794,16 +1810,40 @@ Never pick the post's own author as a replier. Keep all replies short and chaoti
             (r) => r && typeof r.text === "string" && typeof r.characterId === "string",
           )
         : [];
+      // Round 1.11.32 Faza E — conservative type-guard for relationshipShift.
+      // The new OMIT/INCLUDE contract should keep the field out of the JSON
+      // when the post is off-topic, but a defensive parser still needs to
+      // catch:
+      //   * null / missing key → undefined (legitimate OMIT)
+      //   * empty / placeholder objects ({}, {characterId: null}) → undefined
+      //   * non-string characterId, non-numeric delta → undefined
+      //   * delta === 0 → undefined (no actual movement, treat as off-topic)
+      // Anything that survives all four checks is a real shift we trust.
+      const rawShift = parsed.relationshipShift as
+        | { characterId?: unknown; delta?: unknown; reason?: unknown }
+        | undefined
+        | null;
+      let relationshipShift: SinglePostResult["relationshipShift"] = undefined;
+      if (
+        rawShift &&
+        typeof rawShift === "object" &&
+        typeof rawShift.characterId === "string" &&
+        rawShift.characterId.length > 0 &&
+        typeof rawShift.delta === "number" &&
+        Number.isFinite(rawShift.delta) &&
+        rawShift.delta !== 0
+      ) {
+        relationshipShift = {
+          characterId: rawShift.characterId,
+          delta: rawShift.delta,
+          reason: typeof rawShift.reason === "string" ? rawShift.reason : "",
+        };
+      }
       return {
         characterId: args.characterId,
         text: parsed.text as string,
         threadReplies: replies,
-        relationshipShift:
-          parsed.relationshipShift &&
-          typeof parsed.relationshipShift === "object" &&
-          typeof (parsed.relationshipShift as { characterId?: unknown }).characterId === "string"
-            ? (parsed.relationshipShift as SinglePostResult["relationshipShift"])
-            : undefined,
+        relationshipShift,
       };
     }
     console.warn(
@@ -2020,8 +2060,15 @@ Make the three options PERSPIRED to the crisis cause — different tones (humble
 
 // ---------------- Post replies ----------------
 
+// Round 1.11.32 Faza E — tone tag on each reply drives the precise
+// "Stan Wars" defender-only likes multiplier in applyPostReplies. AI is
+// asked to classify each reply as defense / attack / neutral based on
+// chemistry + crisis state; client treats missing/unknown tone as
+// "neutral" (no multiplier) so any model hallucination degrades safely.
+export type ReplyTone = "defense" | "attack" | "neutral";
+
 export type PostRepliesResult = {
-  replies: Array<{ characterId: string; text: string }>;
+  replies: Array<{ characterId: string; text: string; tone?: ReplyTone }>;
   relationshipShifts: Array<{ characterId: string; delta: number; reason: string }>;
   metrics?: { likeBoost?: number; repostBoost?: string };
   playerStatChanges?: { humor?: number; aura?: number };
@@ -2287,24 +2334,30 @@ EMERGENT FAN DEFENSE PROTOCOL — player is at crisisLevel ${args.crisisContext.
           ? ` after public feud with @${args.crisisContext.originCharacterId}`
           : ""
       }.
-Fans/celebs with vibe > 60 MUST defend the player in their replies. Few-shot examples for DEFENSIVE replies:
-- "this take is so reaching i can't even"
-- "the way y'all jump on @${args.player.handle.replace(/^@/, "")} for ANYTHING"
-- "literally just let them breathe for 30 seconds"
-- "the receipts for this drama don't exist"
-- "yall do this every cycle and it's so old"
+Each reply MUST be tagged with a "tone" field: "defense" | "attack" | "neutral".
+- "defense" = the replier is taking the player's side, calling off the dogpile, or attacking the haters.
+- "attack" = the replier is piling on, mocking, escalating drama against the player.
+- "neutral" = the replier is reacting to the post content without picking a side in the crisis (jokes, observations, off-topic riffs).
 
-Hostile fans / low-vibe accounts escalate:
-- "this confirms everything i said yesterday"
-- "the spiral is accelerating"
-- "imagine still defending this"
-- "the receipts don't lie even if you do"
+Few-shot examples — DEFENSE tone:
+- "this take is so reaching i can't even" → tone: defense
+- "the way y'all jump on @${args.player.handle.replace(/^@/, "")} for ANYTHING" → tone: defense
+- "literally just let them breathe for 30 seconds" → tone: defense
+- "the receipts for this drama don't exist" → tone: defense
+- "yall do this every cycle and it's so old" → tone: defense
 
-Distribution scales with crisisLevel:
-- 20-40 → 70% defenders / 30% escalators
-- 40-70 → 50/50 split
-- 70+   → 30% defenders / 70% escalators (the hate is louder)
-${args.crisisContext.layingLow ? "Player is LAYING LOW — fans defending should add 'leave them alone they're laying low'-style lines." : ""}`
+Few-shot examples — ATTACK tone:
+- "this confirms everything i said yesterday" → tone: attack
+- "the spiral is accelerating" → tone: attack
+- "imagine still defending this" → tone: attack
+- "the receipts don't lie even if you do" → tone: attack
+
+DISTRIBUTION SCALES WITH crisisLevel (HARD RULE — apply this ratio across the replies you generate):
+- 20-40  → 70% defense / 30% attack / sparse neutral
+- 40-70  → 50% defense / 50% attack / sparse neutral
+- 70-80  → 30% defense / 70% attack / sparse neutral
+- 80-100 → 20% defense / 80% attack (toxic dominance — Stan Wars mode, sparse neutral)
+${args.crisisContext.layingLow ? "Player is LAYING LOW — defense replies should add 'leave them alone they're laying low'-style lines." : ""}`
     : ""
 }
 
@@ -2321,11 +2374,24 @@ Fan accounts can be hype/critique/jokes; celebrity replies should sound like the
 
 Return STRICT JSON only, no commentary:
 {
-  "replies": [{ "characterId": "<id>", "text": "<short reply, 1-2 sentences>" }],
+  "replies": [
+    {
+      "characterId": "<id>",
+      "text": "<short reply, 1-2 sentences>",
+      "tone": "defense" | "attack" | "neutral"
+    }
+  ],
   "relationshipShifts": [{ "characterId": "<celebrity id only>", "delta": <-3..3>, "reason": "<one specific sentence referencing the post>" }],
   "metrics": { "likeBoost": <0..50000>, "repostBoost": "<e.g. 12.4K>" },
   "playerStatChanges": { "humor": <decimal -2.0..2.0 with ONE decimal e.g. 0.8>, "aura": <decimal -2.0..2.0 with ONE decimal e.g. 1.1> }
 }
+
+\`tone\` field rules:
+- ALWAYS include "tone" on every reply object. Allowed values: "defense" | "attack" | "neutral".
+- When NO crisis is active (or crisisLevel ≤ 20), most replies are "neutral"
+  — pick "defense" / "attack" only if the reply text genuinely takes a side.
+- When a crisis IS active, follow the distribution ratios above STRICTLY.
+
 playerStatChanges represents how this post lands for the player's Humor / Aura standing — small decimal numbers, mostly 0–1 either direction. ONE decimal precision (e.g. 0.5, 1.2, -0.4).`;
 
   try {

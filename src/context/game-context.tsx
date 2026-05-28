@@ -1,4 +1,4 @@
-import * as Haptics from "expo-haptics";
+﻿import * as Haptics from "expo-haptics";
 // expo-file-system v19 split into a new Paths API; the legacy entry preserves the documentDirectory + read/write/delete helpers we rely on.
 import * as FileSystem from "expo-file-system/legacy";
 import * as SecureStore from "expo-secure-store";
@@ -88,7 +88,7 @@ export function getBannerChoices() {
 }
 
 // Blank-slate default. Player Setup screen must collect name/handle/bio
-// before initializeCharacter() runs — these empty strings exist so the
+// before initializeCharacter() runs â€” these empty strings exist so the
 // PlayerProfile type stays satisfied during the brief window between
 // state hydration and the Setup screen.
 const defaultPlayer: PlayerProfile = {
@@ -269,7 +269,7 @@ function createInitialState(): GameState {
     isGenerating: false,
     activeChatId: null,
     fanIdentityCache: {},
-    // Round 1.11.32 Faza B — pre-fetch engine fields.
+    // Round 1.11.32 Faza B â€” pre-fetch engine fields.
     // The pool stays empty here on the landing/hub phase; it's freshly
     // built inside initializeCharacter (scenario start) and rebuilt on
     // every completeEvent (day rollover).
@@ -278,12 +278,9 @@ function createInitialState(): GameState {
     isFetchingBackgroundPost: false,
     currentEventContext: null,
     lastBackgroundFetchError: null,
-    // Round 1.11.32 Faza D — Stan Wars defaults.
-    crisisLevel: 0,
-    crisisOrigin: null,
-    crisisStartedDay: null,
-    crisisLayingLow: false,
-    prHistory: [],
+    // Round 1.11.32 Faza E â€” crisis defaults via resetCrisisState helper.
+    // Same shape consumed by initializeCharacter on scenario rollover.
+    ...resetCrisisState(),
   };
 }
 
@@ -350,18 +347,18 @@ type GameContextValue = {
   resolveCharacter: (id: string) => (Character & { isOutlet?: boolean }) | undefined;
   updateCharacterOverride: (id: string, patch: Partial<{ avatar: AvatarSource; banner: AvatarSource; name: string; handle: string; bio: string; description: string }>) => void;
 
-  // Round 1.11.32 Faza D — Stan Wars / Cancel Culture controls.
+  // Round 1.11.32 Faza D â€” Stan Wars / Cancel Culture controls.
   // Fetch 3 PR Stunt options for the current crisis (AI when online,
   // offline bank when not). Calling `prActionsOpen` true after the
   // fetch surfaces the modal with the freshly-loaded list.
   fetchPRStuntOptions: () => Promise<PRStuntOption[]>;
-  // Apply a chosen PR Stunt — burns the stat cost, knocks the crisis
+  // Apply a chosen PR Stunt â€” burns the stat cost, knocks the crisis
   // level down by `effect`, logs into prHistory + activityLog.
   triggerPRStunt: (option: PRStuntOption) => void;
   // Toggle "laying low" mode. Flips the boolean and surfaces a toast
   // explaining the consequence (faster decay, 70% follower throttle).
   toggleLayingLow: () => void;
-  // Divert attention — costs 2 energy + sacrifices a chosen target's
+  // Divert attention â€” costs 2 energy + sacrifices a chosen target's
   // vibe (-20..-30) for a 30-50 crisis drop. Fires a priority Pop Craze
   // post into the FRONT of the buffer so the player sees the leak first.
   triggerDivertAttention: (targetCharacterId: string) => Promise<void>;
@@ -456,7 +453,7 @@ function softHaptic() {
 function logEntry(args: Omit<ActivityLogEntry, "id" | "createdAt">): ActivityLogEntry {
   return {
     id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    createdAt: `${nowLabel()} • ${new Date().toLocaleDateString()}`,
+    createdAt: `${nowLabel()} â€˘ ${new Date().toLocaleDateString()}`,
     ...args,
   };
 }
@@ -466,16 +463,16 @@ export function GameProvider({ children }: PropsWithChildren) {
   const [ready, setReady] = useState(false);
   const [pendingEvent, setPendingEvent] = useState<EventOutcome | null>(null);
   const [completingEvent, setCompletingEvent] = useState(false);
-  // Round 1.11.32 Faza D — PR Actions modal visibility lives in the
+  // Round 1.11.32 Faza D â€” PR Actions modal visibility lives in the
   // provider so any screen can open it (CrisisBar tap, toast CTA, etc).
   const [prActionsOpen, setPRActionsOpen] = useState(false);
   const stateRef = useRef(state);
-  // Round 1.11.9 — synchronous fetch lock. React's `isGenerating` setState is
+  // Round 1.11.9 â€” synchronous fetch lock. React's `isGenerating` setState is
   // async and batched, so two rapid taps on a refresh / send button could
   // both pass the `if (state.isGenerating) return` guard before either
   // setState commits. This ref flips IMMEDIATELY (synchronously) inside
   // refreshFeed / sendChatMessage / fetchSuggestions, eliminating that race.
-  // The global `state.isGenerating` is still set/cleared in parallel — that
+  // The global `state.isGenerating` is still set/cleared in parallel â€” that
   // one drives the UI "disabled" affordance; this ref is the contract.
   const isFetchingRef = useRef(false);
 
@@ -492,7 +489,7 @@ export function GameProvider({ children }: PropsWithChildren) {
         const raw = await FileSystem.readAsStringAsync(GAME_STATE_PATH);
         loadedState = JSON.parse(raw) as Partial<GameState>;
       } catch {
-        /* file missing / corrupted — fall through to initial state */
+        /* file missing / corrupted â€” fall through to initial state */
       }
       let storedApiKey: string | null = null;
       try {
@@ -520,7 +517,7 @@ export function GameProvider({ children }: PropsWithChildren) {
     };
   }, []);
 
-  // Round 1.11.9 — persistence uses GRANULAR deps instead of `state` so the
+  // Round 1.11.9 â€” persistence uses GRANULAR deps instead of `state` so the
   // effect doesn't re-fire (and the heavy JSON.stringify doesn't run) every
   // time a modal flag flips or `isGenerating` toggles. We list only the
   // fields that are actually persisted; ephemeral UI fields (composeOpen,
@@ -563,17 +560,17 @@ export function GameProvider({ children }: PropsWithChildren) {
         bonusEnergy: state.bonusEnergy,
         characterOverrides: state.characterOverrides,
         hideDMsInLog: state.hideDMsInLog,
-        // Round 1.11.32 Faza B — pre-fetch engine continuity. Buffer +
+        // Round 1.11.32 Faza B â€” pre-fetch engine continuity. Buffer +
         // pool persisted so close/reopen mid-day keeps the same daily
         // arc. fanIdentityCache also persisted so AI-minted handles
         // keep their avatar mappings forever. Transient flags
         // (isFetchingBackgroundPost, lastBackgroundFetchError) are
-        // intentionally omitted — they should always reset on cold start.
+        // intentionally omitted â€” they should always reset on cold start.
         fanIdentityCache: state.fanIdentityCache,
         dailyAuthorPool: state.dailyAuthorPool,
         pendingBackgroundPosts: state.pendingBackgroundPosts,
         currentEventContext: state.currentEventContext,
-        // Round 1.11.32 Faza D — crisis state persisted (close/reopen
+        // Round 1.11.32 Faza D â€” crisis state persisted (close/reopen
         // mid-storm keeps the meter where you left it).
         crisisLevel: state.crisisLevel,
         crisisOrigin: state.crisisOrigin,
@@ -589,7 +586,7 @@ export function GameProvider({ children }: PropsWithChildren) {
       });
     }, 800);
     return () => clearTimeout(timeout);
-    // Granular deps — only persisted fields. UI flags intentionally excluded.
+    // Granular deps â€” only persisted fields. UI flags intentionally excluded.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     ready,
@@ -632,7 +629,7 @@ export function GameProvider({ children }: PropsWithChildren) {
   ]);
 
   // ===========================================================
-  // Round 1.11.32 Faza B — BACKGROUND PRE-FETCH ENGINE
+  // Round 1.11.32 Faza B â€” BACKGROUND PRE-FETCH ENGINE
   // ===========================================================
   // Watches the daily pool + buffer state and drains the pool one post
   // at a time, accumulating into pendingBackgroundPosts. Stops cleanly
@@ -641,19 +638,19 @@ export function GameProvider({ children }: PropsWithChildren) {
   // StrictMode's double-render and rapid state churn cannot spawn
   // parallel calls.
   //
-  // The reducer (setState) stays 100% pure — every side effect lives in
+  // The reducer (setState) stays 100% pure â€” every side effect lives in
   // the async closure below. Reads from `stateRef.current` to dodge the
   // closure-stale-state trap; writes go through setState only.
   const bgFetchLockRef = useRef(false);
   useEffect(() => {
-    // Quick exits — keep the hot path cheap so re-renders are free.
+    // Quick exits â€” keep the hot path cheap so re-renders are free.
     if (state.phase !== "game") return;
     if (!ready) return;
     if (bgFetchLockRef.current) return;
     if (state.isFetchingBackgroundPost) return;
     // Pool exhausted? Nothing to fetch until completeEvent rebuilds it.
     if (state.dailyAuthorPool.celebs.length === 0 && state.dailyAuthorPool.fanSlots <= 0) return;
-    // Backoff window honored — bg failures don't hammer the API.
+    // Backoff window honored â€” bg failures don't hammer the API.
     if (state.lastBackgroundFetchError) {
       const elapsed = Date.now() - state.lastBackgroundFetchError.at;
       const tries = state.lastBackgroundFetchError.tries;
@@ -667,7 +664,7 @@ export function GameProvider({ children }: PropsWithChildren) {
     (async () => {
       // Read everything off the ref to dodge stale closures.
       const cur = stateRef.current;
-      // Resolve activeWorld locally — same lookup the useMemo uses.
+      // Resolve activeWorld locally â€” same lookup the useMemo uses.
       const activeWorld =
         [...builtinWorlds, ...cur.customWorlds].find((w) => w.id === cur.selectedWorldId) ??
         builtinWorlds[0];
@@ -693,7 +690,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             | Character
             | undefined);
       const contactChemistry = cur.contacts[authorId]?.chemistryLabel;
-      // 50/50 relateToEvent when context exists — matches the user-locked
+      // 50/50 relateToEvent when context exists â€” matches the user-locked
       // 50% on-topic / 50% off-topic content split for the day's feed.
       const relateToEvent = !!cur.currentEventContext && Math.random() < 0.5;
 
@@ -708,14 +705,14 @@ export function GameProvider({ children }: PropsWithChildren) {
           character,
           contactChemistry,
           recentPlayerActions: cur.activityLog.slice(0, 3).map((l) => l.title),
-          // Round 1.11.32 Alpha Fix #4 — feed the full active cast into
+          // Round 1.11.32 Alpha Fix #4 â€” feed the full active cast into
           // the prompt so AI can weave celeb cross-comments into the
           // post's threadReplies. We use `contacts` keys (full cast)
           // rather than `dailyAuthorPool.celebs` (today's drain queue)
           // because cross-comments shouldn't be gated by who's already
-          // posted today — anyone in the cast can react.
+          // posted today â€” anyone in the cast can react.
           castCelebIds: Object.keys(cur.contacts),
-          // Round 1.11.32 Faza D — crisis context for the bg fetcher
+          // Round 1.11.32 Faza D â€” crisis context for the bg fetcher
           // matches the post-replies path. Gated > 20 server-side too.
           crisisContext:
             cur.crisisLevel > 20
@@ -783,9 +780,9 @@ export function GameProvider({ children }: PropsWithChildren) {
           for (const tr of threadReplies) fanCandidates.push(tr.authorId);
           const nextFanCache = mintFanIdentities(s2.fanIdentityCache, fanCandidates);
 
-          // Round 1.11.32 (Poprawka 2) — apply optional per-post
+          // Round 1.11.32 (Poprawka 2) â€” apply optional per-post
           // relationshipShift to the matching contact. The AI may attach
-          // a tiny ±delta when the post is relevant to one cast member
+          // a tiny Â±delta when the post is relevant to one cast member
           // (e.g. Sabrina posting in support of the player's event
           // choice). Without this block the shift would be parsed by
           // generateSinglePost and then silently dropped on the floor.
@@ -825,7 +822,7 @@ export function GameProvider({ children }: PropsWithChildren) {
       } catch (err) {
         // generateSinglePost already catches AI network/parse errors and
         // returns offline-synthesized content. Reaching this catch means
-        // a true JS-level exception slipped through — rare but possible.
+        // a true JS-level exception slipped through â€” rare but possible.
         console.warn("[bg-fetch] unexpected failure:", err);
         setState((s2) => {
           const tries = (s2.lastBackgroundFetchError?.tries ?? 0) + 1;
@@ -834,7 +831,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             isFetchingBackgroundPost: false,
             lastBackgroundFetchError: { at: Date.now(), tries },
             // After two consecutive failures surface the Faza A top toast.
-            // The toast is non-blocking — pull-to-refresh still works.
+            // The toast is non-blocking â€” pull-to-refresh still works.
             lastToast:
               tries >= 2 && !s2.lastToast
                 ? {
@@ -902,8 +899,8 @@ export function GameProvider({ children }: PropsWithChildren) {
         softHaptic();
         setState((s) => {
           // Scenario-aware Day-1 viral spike (Round 1.10). All scenarios
-          // start the player at 0 followers — they build their base from
-          // nothing. EXCEPTION: "accidentally-famous" — its inciting
+          // start the player at 0 followers â€” they build their base from
+          // nothing. EXCEPTION: "accidentally-famous" â€” its inciting
           // incident IS the player going viral overnight. We simulate that
           // with a 50-300 follower starter bump + a welcome toast that
           // frames it narratively.
@@ -949,13 +946,13 @@ export function GameProvider({ children }: PropsWithChildren) {
             bonusEnergy: 0,
             isGenerating: false,
             activeChatId: null,
-            // Clear cache on fresh character init — old fan identities
+            // Clear cache on fresh character init â€” old fan identities
             // from a previous scenario should not leak in.
             fanIdentityCache: {},
-            // Round 1.11.32 Faza B — first daily pool is built immediately
+            // Round 1.11.32 Faza B â€” first daily pool is built immediately
             // so the bg fetcher has work the moment the player lands on
             // the feed. Cast IDs come from contacts after addCharacter
-            // calls; on Day 1 the player may have 0 cast → the pool falls
+            // calls; on Day 1 the player may have 0 cast â†’ the pool falls
             // back to outlet fillers + full 5+6=11 fan slots.
             dailyAuthorPool: buildDailyAuthorPool(
               Object.keys(s.contacts),
@@ -963,16 +960,13 @@ export function GameProvider({ children }: PropsWithChildren) {
             ),
             pendingBackgroundPosts: [],
             isFetchingBackgroundPost: false,
-            // Day 1 has no event yet — pool fetches will all be off-topic.
+            // Day 1 has no event yet â€” pool fetches will all be off-topic.
             currentEventContext: null,
             lastBackgroundFetchError: null,
-            // Round 1.11.32 Faza D — fresh slate. Crisis state never
-            // carries across scenarios.
-            crisisLevel: 0,
-            crisisOrigin: null,
-            crisisStartedDay: null,
-            crisisLayingLow: false,
-            prHistory: [],
+            // Round 1.11.32 Faza E â€” fresh slate via DRY helper. Crisis
+            // state never carries across scenarios; resetCrisisState() is
+            // the single source of truth for the wipe shape.
+            ...resetCrisisState(),
             activeTab: "feed",
             phase: "game",
           };
@@ -1016,8 +1010,8 @@ export function GameProvider({ children }: PropsWithChildren) {
           posts: s.posts.map((p) => (p.id === postId ? { ...p, starred: !p.starred } : p)),
         }));
       },
-      // Repost toggle. `reposts` is a human-readable string like "4.7K" / "12" —
-      // we parse the leading number, bump it by ±1, and re-format so the player
+      // Repost toggle. `reposts` is a human-readable string like "4.7K" / "12" â€”
+      // we parse the leading number, bump it by Â±1, and re-format so the player
       // sees the count actually move.
       repostPost: (postId) => {
         softHaptic();
@@ -1092,19 +1086,19 @@ export function GameProvider({ children }: PropsWithChildren) {
       },
 
       refreshFeed: async () => {
-        // Round 1.11.32 Faza B — pull-to-refresh now serves the LOCAL
+        // Round 1.11.32 Faza B â€” pull-to-refresh now serves the LOCAL
         // pre-fetch buffer first; ambient AI calls are owned exclusively
         // by the background fetcher useEffect. Two paths:
-        //   1. A post-replies action is queued (player just posted) →
-        //      run the AI call normally — this is a player-driven,
+        //   1. A post-replies action is queued (player just posted) â†’
+        //      run the AI call normally â€” this is a player-driven,
         //      synchronous-feeling beat.
-        //   2. Otherwise → flush pendingBackgroundPosts into the feed.
+        //   2. Otherwise â†’ flush pendingBackgroundPosts into the feed.
         //      If the buffer is empty, exit silently and let the FeedScreen
         //      spinner reflect isFetchingBackgroundPost; the bg fetcher
         //      will populate the buffer on its own cadence.
         //
         // Legacy daily-tick / event-aftermath / activity-aftermath actions
-        // that may live in saved games are silently drained — the bg
+        // that may live in saved games are silently drained â€” the bg
         // fetcher handles their semantic now.
         if (isFetchingRef.current) return;
         if (stateRef.current.isGenerating) return;
@@ -1112,7 +1106,7 @@ export function GameProvider({ children }: PropsWithChildren) {
         const queue = stateRef.current.pendingActions;
         const postRepliesIdx = queue.findIndex((a) => a.kind === "post-replies");
 
-        // Path 1 — player-driven post-replies action.
+        // Path 1 â€” player-driven post-replies action.
         if (postRepliesIdx >= 0) {
           const action = queue[postRepliesIdx];
           if (action.kind !== "post-replies") return; // narrow for TS
@@ -1149,7 +1143,7 @@ export function GameProvider({ children }: PropsWithChildren) {
               replyMode: !!contextReply,
               originalAuthor: author?.name,
               contextReplyText: contextReply?.text,
-              // Round 1.11.32 Faza D — crisis context lets the AI
+              // Round 1.11.32 Faza D â€” crisis context lets the AI
               // activate defensive fan voicing. Only attached when
               // level > 20 (token-saving guard).
               crisisContext:
@@ -1172,12 +1166,12 @@ export function GameProvider({ children }: PropsWithChildren) {
           return;
         }
 
-        // Path 2 — flush pre-fetched buffer into the visible feed. The
+        // Path 2 â€” flush pre-fetched buffer into the visible feed. The
         // cumulative drain matches the "phone in pocket" UX: if the player
         // left the app idle long enough, every accumulated post lands in
         // one pull. Legacy ambient pending actions (daily-tick /
         // event-aftermath / activity-aftermath from saved games) are
-        // dropped here — the bg fetcher owns ambient content now.
+        // dropped here â€” the bg fetcher owns ambient content now.
         const buffered = stateRef.current.pendingBackgroundPosts;
         const staleActions = stateRef.current.pendingActions.filter(
           (a) => a.kind !== "post-replies",
@@ -1192,7 +1186,7 @@ export function GameProvider({ children }: PropsWithChildren) {
           return;
         }
 
-        // Path 3 — buffer empty and pool exhausted. Surface a soft toast
+        // Path 3 â€” buffer empty and pool exhausted. Surface a soft toast
         // so the player understands why the pull did nothing. Only fires
         // when there's no in-flight fetch (otherwise the spinner UX is
         // enough signal).
@@ -1214,7 +1208,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             },
           }));
         }
-        // If isFetchingBackgroundPost is true, we just wait — FeedScreen
+        // If isFetchingBackgroundPost is true, we just wait â€” FeedScreen
         // keeps the spinner spinning until the bg fetcher resolves.
       },
 
@@ -1233,7 +1227,7 @@ export function GameProvider({ children }: PropsWithChildren) {
           return;
         }
         softHaptic();
-        // Round 1.11.32 Alpha Fix #5 — initial organic likes roll. The
+        // Round 1.11.32 Alpha Fix #5 â€” initial organic likes roll. The
         // previous `likes: 0` left player replies looking dead even after
         // multiple refreshes (the late-arriving bump from applyPostReplies
         // moved by ~1-2 likes early-game). rollPlayerReplyLikes seeds
@@ -1290,7 +1284,7 @@ export function GameProvider({ children }: PropsWithChildren) {
           id: `r-${Date.now()}`,
           authorId: "player",
           text: trimmed,
-          // Same initial roll — sub-replies under celeb threads also need
+          // Same initial roll â€” sub-replies under celeb threads also need
           // organic engagement, not a flat zero.
           likes: rollPlayerReplyLikes(stateRef.current.player),
           createdAt: nowLabel(),
@@ -1350,7 +1344,7 @@ export function GameProvider({ children }: PropsWithChildren) {
       },
 
       fetchSuggestions: async (kind, context) => {
-        // Round 1.11.9 — guard against double-firing while another AI
+        // Round 1.11.9 â€” guard against double-firing while another AI
         // request is already in flight. Suggestions are non-essential UX
         // so we just bail with empty list rather than queue up.
         if (isFetchingRef.current) return [];
@@ -1449,7 +1443,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             verified: false,
             proactive: false,
             systemPrompt: "",
-            isOutlet: true, // render as outlet/fan — no profile sheet
+            isOutlet: true, // render as outlet/fan â€” no profile sheet
           } as Character & { isOutlet?: boolean };
         }
         const override = state.characterOverrides[id] ?? {};
@@ -1467,7 +1461,7 @@ export function GameProvider({ children }: PropsWithChildren) {
           verified: source.verified,
           proactive: "proactive" in source ? source.proactive : false,
           systemPrompt: "systemPrompt" in source ? source.systemPrompt : "",
-          // Outlets and fans both render with the "isOutlet" flag — they aren't
+          // Outlets and fans both render with the "isOutlet" flag â€” they aren't
           // members of the player's cast and don't have profile sheets.
           isOutlet: !!outlet || !!fan,
         } as Character & { isOutlet?: boolean };
@@ -1484,7 +1478,7 @@ export function GameProvider({ children }: PropsWithChildren) {
         }));
       },
 
-      // ----- Round 1.11.32 Faza D — Stan Wars actions
+      // ----- Round 1.11.32 Faza D â€” Stan Wars actions
       prActionsOpen,
       setPRActionsOpen: (open) => setPRActionsOpen(open),
 
@@ -1496,7 +1490,7 @@ export function GameProvider({ children }: PropsWithChildren) {
           crisisLevel: stateRef.current.crisisLevel,
           recentActions: stateRef.current.activityLog
             .slice(0, 3)
-            .map((l) => `${l.title} — ${l.body ?? ""}`),
+            .map((l) => `${l.title} â€” ${l.body ?? ""}`),
         });
       },
 
@@ -1514,7 +1508,7 @@ export function GameProvider({ children }: PropsWithChildren) {
               ...reduced.player,
               socialPresence: { humor: newHumor, aura: newAura },
             },
-            // Cap prHistory at the last 20 entries — protects save size
+            // Cap prHistory at the last 20 entries â€” protects save size
             // and matches the user-locked limit.
             prHistory: [
               ...reduced.prHistory,
@@ -1545,7 +1539,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             lastToast: {
               id: `t-pr-${Date.now()}`,
               headline: `PR move: ${option.title}`,
-              body: `Crisis ↓${option.effect}. The cycle moves on.`,
+              body: `Crisis â†“${option.effect}. The cycle moves on.`,
               presenceDeltas: [],
               relationshipDeltas: [],
             },
@@ -1566,8 +1560,8 @@ export function GameProvider({ children }: PropsWithChildren) {
               day: s.day,
               action: "laying-low" as CrisisAction,
               effect: !s.crisisLayingLow
-                ? "Toggled ON — decay -8/day, followers 0.3×"
-                : "Toggled OFF — normal posting resumed",
+                ? "Toggled ON â€” decay -8/day, followers 0.3Ă—"
+                : "Toggled OFF â€” normal posting resumed",
             },
           ].slice(-20),
           lastToast: {
@@ -1585,7 +1579,7 @@ export function GameProvider({ children }: PropsWithChildren) {
       triggerDivertAttention: async (targetCharacterId) => {
         if (stateRef.current.crisisLevel <= 0) return;
         if (stateRef.current.isGenerating) return;
-        // Energy cost = 2 (heavier than a normal PR stunt — divert spends
+        // Energy cost = 2 (heavier than a normal PR stunt â€” divert spends
         // a relationship AND publishes a story).
         const energyAfterFirst = consumeEnergy(stateRef.current);
         if (!energyAfterFirst.ok) {
@@ -1652,7 +1646,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             lastToast: {
               id: `t-divert-${Date.now()}`,
               headline: `Heat redirected to ${targetName}`,
-              body: `Crisis ↓${Math.abs(crisisDrop)}. ${targetName}'s vibe took the hit.`,
+              body: `Crisis â†“${Math.abs(crisisDrop)}. ${targetName}'s vibe took the hit.`,
               presenceDeltas: [],
               relationshipDeltas: [{ characterId: targetCharacterId, direction: "down" }],
             },
@@ -1661,7 +1655,7 @@ export function GameProvider({ children }: PropsWithChildren) {
         setPRActionsOpen(false);
 
         // Priority leak post: try AI Pop Craze, fall back gracefully if
-        // it fails — the crisis drop already landed via setState above,
+        // it fails â€” the crisis drop already landed via setState above,
         // so a network hiccup just means no leak post (acceptable).
         try {
           const cur = stateRef.current;
@@ -1743,7 +1737,7 @@ export function GameProvider({ children }: PropsWithChildren) {
       },
       completeEvent: async (action) => {
         if (stateRef.current.isGenerating) return;
-        // Event itself costs energy — but ALSO refills via bumpDayEnergy on rollover.
+        // Event itself costs energy â€” but ALSO refills via bumpDayEnergy on rollover.
         if (!consumeEnergy(stateRef.current).ok) {
           softHaptic();
           setState((s) => ({ ...s, lastToast: outOfEnergyToast(), eventOpen: false }));
@@ -1767,7 +1761,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             event,
             choice: action,
             outlets: outletCharacters.map((o) => o.id),
-            // Round 1.11.12 — pass cast + contacts so AI can attribute
+            // Round 1.11.12 â€” pass cast + contacts so AI can attribute
             // immediate relationship shifts and offline fallback can
             // synthesise them for the toast.
             cast,
@@ -1798,32 +1792,32 @@ export function GameProvider({ children }: PropsWithChildren) {
                 }
               : null;
 
-            // Round 1.11.32 Faza B — daily-tick queueing REMOVED. The
+            // Round 1.11.32 Faza B â€” daily-tick queueing REMOVED. The
             // bg fetcher useEffect owns world tick now; the old 30%
             // chance to enqueue an extra ambient pull is supplanted by
             // the engine's continuous drain of dailyAuthorPool.
 
             // Event follower bump (Round 1.10). Events are bigger story
-            // beats than regular posts — synthesize a chunkier likeBoost
+            // beats than regular posts â€” synthesize a chunkier likeBoost
             // (2k-5k) before rolling so the follower yield is meaningfully
             // larger than applyPostReplies. Late-game (humor=80, aura=80)
-            // an event can yield ~500-1500 followers in a single beat —
+            // an event can yield ~500-1500 followers in a single beat â€”
             // matches "+415" in the original Status post-event screenshot.
             const eventLikeBoost = Math.floor(2000 + Math.random() * 3000);
-            // Round 1.11.32 Faza D — apply crisisFollowerMult to event
+            // Round 1.11.32 Faza D â€” apply crisisFollowerMult to event
             // gain too. A major event during a 100/100 blackout still
-            // earns some followers (0.1× of 2000-3000 base ≈ 200-300)
+            // earns some followers (0.1Ă— of 2000-3000 base â‰ 200-300)
             // because the event itself is a big news moment, but the
             // mult conveys "the world is half-ignoring you right now".
             const eventFollowerGain = Math.floor(
               rollFollowerGain(eventLikeBoost, next.player) * crisisFollowerMult(next),
             );
 
-            // Round 1.11.12 — apply per-character relationship shifts from the
+            // Round 1.11.12 â€” apply per-character relationship shifts from the
             // event result. This mirrors what applyPostReplies does for
             // post-reply beats: each shift bumps the contact's vibe, updates
             // their mood/feeling, and produces a relationshipChange entry for
-            // the toast (avatar + Δ% + CenteredBar at vibeAfter + rationale).
+            // the toast (avatar + Î”% + CenteredBar at vibeAfter + rationale).
             const eventShifts = result.relationshipShifts ?? [];
             const contactsAfterEvent = { ...next.contacts };
             const eventRelChanges: NonNullable<
@@ -1850,7 +1844,7 @@ export function GameProvider({ children }: PropsWithChildren) {
               });
             }
 
-            // Round 1.11.32 Faza B — day rollover wipes the pre-fetch
+            // Round 1.11.32 Faza B â€” day rollover wipes the pre-fetch
             // bufor + rebuilds the daily pool from scratch. Stale posts
             // generated BEFORE the event are dropped (they referenced an
             // old worldview); the bg fetcher will start filling the new
@@ -1901,7 +1895,7 @@ export function GameProvider({ children }: PropsWithChildren) {
                 id: `t-${Date.now()}`,
                 headline: result.outcomeText.split(".")[0],
                 body: result.outcomeText,
-                // Round 1.11 — pithy slogan for collapsed body, falls back to
+                // Round 1.11 â€” pithy slogan for collapsed body, falls back to
                 // first sentence of outcomeText so legacy AI responses still
                 // render gracefully.
                 summary: result.summary,
@@ -1912,9 +1906,9 @@ export function GameProvider({ children }: PropsWithChildren) {
                 // row stays clean rather than showing 0.0%.
                 humorDelta: result.humorDelta,
                 auraDelta: result.auraDelta,
-                // Round 1.11.12 — relationshipChanges populated from
+                // Round 1.11.12 â€” relationshipChanges populated from
                 // result.relationshipShifts (online AI or offline fallback).
-                // Same shape as applyPostReplies → consistent toast UI.
+                // Same shape as applyPostReplies â†’ consistent toast UI.
                 relationshipChanges: eventRelChanges.length > 0 ? eventRelChanges : undefined,
                 presenceDeltas: result.scoreChanges
                   .filter((c) => /humor|aura/i.test(c.label))
@@ -1930,14 +1924,14 @@ export function GameProvider({ children }: PropsWithChildren) {
                 })),
               },
             };
-            // Round 1.11.32 Faza D — natural crisis decay on day rollover.
+            // Round 1.11.32 Faza D â€” natural crisis decay on day rollover.
             // Laying low accelerates the meter's cooldown (-8/day) vs the
             // normal passive drift (-3/day). applyCrisisDelta handles the
             // 0-floor transition so the meter cleanly resets to "no crisis"
             // (clearing origin + laying-low flag) when it lands at 0.
             const decay = next.crisisLayingLow ? 8 : 3;
             next = applyCrisisDelta(next, -decay);
-            // Crisis trigger from this event's relationship shifts too —
+            // Crisis trigger from this event's relationship shifts too â€”
             // an event-misstep that drops a contact below -50 still spikes
             // the meter, even though completeEvent doesn't go through
             // applyPostReplies' detectCrisisTrigger path.
@@ -2019,7 +2013,7 @@ export function GameProvider({ children }: PropsWithChildren) {
                     kind: "milestone-completed",
                     title: "Milestone completed:",
                     body: m.title,
-                    outcome: `Your milestone is a masterclass in unintended consequences — fans, still reeling from your last move, now demand answers like a movement.`,
+                    outcome: `Your milestone is a masterclass in unintended consequences â€” fans, still reeling from your last move, now demand answers like a movement.`,
                     day: s.day,
                     scoreChanges: [{ label: "XP", delta: m.xp, positive: true }],
                   }),
@@ -2175,7 +2169,7 @@ export function GameProvider({ children }: PropsWithChildren) {
       sendChatMessage: async (characterId, text) => {
         const trimmed = text.trim();
         if (!trimmed) return;
-        // Round 1.11.9 — sync fetch lock: two rapid sends can't both pass.
+        // Round 1.11.9 â€” sync fetch lock: two rapid sends can't both pass.
         if (isFetchingRef.current) return;
         if (stateRef.current.isGenerating) return;
         if (!consumeEnergy(stateRef.current).ok) {
@@ -2302,7 +2296,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             logEntry({
               kind: "activity-created",
               title: "You created an activity",
-              body: `${title} (Day ${scheduledDay}) — invited ${inviteeIds.length} characters.`,
+              body: `${title} (Day ${scheduledDay}) â€” invited ${inviteeIds.length} characters.`,
               day: s.day,
             }),
             ...s.activityLog,
@@ -2446,7 +2440,7 @@ export function GameProvider({ children }: PropsWithChildren) {
   return <GameContext.Provider value={value}>{children}</GameContext.Provider>;
 }
 
-// Tiered like-count for thread replies. CINEMATIC tier (Round 1.10) —
+// Tiered like-count for thread replies. CINEMATIC tier (Round 1.10) â€”
 // follower-scaled engagement that matches the original Status game's
 // "wow" numbers, not real X analytics.
 // - Fans (anonymousFanIds): 0-150 with 5% viral chance (150-700).
@@ -2458,8 +2452,8 @@ function rollReplyLikes(authorId: string, followers?: number): number {
   if (anonymousFanIds.includes(authorId)) {
     const viral = Math.random() < 0.05;
     return viral
-      ? Math.floor(150 + Math.random() * 550) // 150–700 (viral fan)
-      : Math.floor(Math.random() * 150);       // 0–150 (zwykły fan)
+      ? Math.floor(150 + Math.random() * 550) // 150â€“700 (viral fan)
+      : Math.floor(Math.random() * 150);       // 0â€“150 (zwykĹ‚y fan)
   }
   if (followers && followers > 0) {
     const viral = Math.random() < 0.05;
@@ -2471,18 +2465,18 @@ function rollReplyLikes(authorId: string, followers?: number): number {
 }
 
 // Like-count for a standalone POST on the feed. CINEMATIC tier (Round 1.10).
-// 1. Fan account (anonymousFanIds) → identical restriction to a fan REPLY:
+// 1. Fan account (anonymousFanIds) â†’ identical restriction to a fan REPLY:
 //    0-150 likes, with a 5% chance to go viral (150-700).
-// 2. Outlet / 0-follower account that is NOT a fan → 10k-50k media fallback.
-// 3. Celebrity → 3-15% normal, 12-40% on viral (10% chance). Kanye normal
+// 2. Outlet / 0-follower account that is NOT a fan â†’ 10k-50k media fallback.
+// 3. Celebrity â†’ 3-15% normal, 12-40% on viral (10% chance). Kanye normal
 //    1-5M, viral 4-13M. Billie normal 4-18M, viral 15-49M. Taylor normal
 //    9-44M, viral 35-117M. Matches the "popcorn energy" of original Status.
 function rollPostLikes(authorId: string, followers: number): number {
   if (anonymousFanIds.includes(authorId)) {
     const viral = Math.random() < 0.05;
     return viral
-      ? Math.floor(150 + Math.random() * 550) // 150–700 (viral fan post)
-      : Math.floor(Math.random() * 150);       // 0–150 (typical fan post)
+      ? Math.floor(150 + Math.random() * 550) // 150â€“700 (viral fan post)
+      : Math.floor(Math.random() * 150);       // 0â€“150 (typical fan post)
   }
   if (followers <= 0) {
     return Math.floor(10_000 + Math.random() * 50_000);
@@ -2496,10 +2490,10 @@ function rollPostLikes(authorId: string, followers: number): number {
 // Player follower growth from a single post-replies refresh or event resolution.
 // Formula: floor((likeBoost * 5% + base 50-200) * presenceBonus)
 // where presenceBonus = 1 + (humor + aura) / 100. Day 1 (humor=0/aura=0)
-// gives 50-200 base. Late game (humor=80/aura=80) multiplies by 2.6× —
+// gives 50-200 base. Late game (humor=80/aura=80) multiplies by 2.6Ă— â€”
 // matches the "+415" follower bump from the original Status screenshot.
 // Floor of 50 means even an actionless refresh still moves the needle.
-// Round 1.11.32 Alpha Fix #5 — organic like growth for the player's own
+// Round 1.11.32 Alpha Fix #5 â€” organic like growth for the player's own
 // replies under any post. Day 1 floor (5-40) keeps comments from sitting
 // at zero forever; follower contribution (0.05-0.15% of follower count)
 // scales late-game numbers; presence bonus adds extra reach for players
@@ -2518,7 +2512,7 @@ function rollPlayerReplyLikes(player: PlayerProfile): number {
 }
 
 // Per-refresh bump under the player's existing replies. Called from
-// applyPostReplies whenever a post-replies action processes — so each
+// applyPostReplies whenever a post-replies action processes â€” so each
 // pull-to-refresh that hits a post the player commented on visibly
 // adds engagement. Scales with followers + presence so growth keeps
 // pace with the player's celebrity-tier journey.
@@ -2534,13 +2528,13 @@ function bumpPlayerReplyLikes(player: PlayerProfile): number {
 }
 
 // =============================================================
-// Round 1.11.32 Faza D — Crisis engine helpers (pure functions)
+// Round 1.11.32 Faza D â€” Crisis engine helpers (pure functions)
 // =============================================================
 
 // Inspect a contacts transition: did anyone JUST cross the -50 vibe
-// threshold (transitioning from ≥-50 to <-50)? Returns the matching
+// threshold (transitioning from â‰Ą-50 to <-50)? Returns the matching
 // origin descriptor or null. Skips IDs the player doesn't actually
-// have in their cast — the AI hallucinating a feud with someone the
+// have in their cast â€” the AI hallucinating a feud with someone the
 // player never added shouldn't trigger a crisis.
 function detectCrisisTrigger(
   prevContacts: GameState["contacts"],
@@ -2548,7 +2542,7 @@ function detectCrisisTrigger(
 ): CrisisOrigin | null {
   for (const [id, c] of Object.entries(nextContacts)) {
     const prev = prevContacts[id]?.vibe;
-    if (prev === undefined) continue; // contact wasn't in cast before — skip
+    if (prev === undefined) continue; // contact wasn't in cast before â€” skip
     if (c.vibe < -50 && prev >= -50) {
       return { kind: "relationship-drop", characterId: id, vibe: c.vibe };
     }
@@ -2556,8 +2550,8 @@ function detectCrisisTrigger(
   return null;
 }
 
-// Move crisisLevel by `delta` with edge-case handling for the 0 → >0
-// onset and >0 → 0 dismissal transitions. Onset stamps the day and
+// Move crisisLevel by `delta` with edge-case handling for the 0 â†’ >0
+// onset and >0 â†’ 0 dismissal transitions. Onset stamps the day and
 // origin; dismissal clears everything including the laying-low flag.
 function applyCrisisDelta(
   s: GameState,
@@ -2585,10 +2579,33 @@ function applyCrisisDelta(
   return { ...s, crisisLevel: newLevel };
 }
 
+// Round 1.11.32 Faza E â€” DRY helper for crisis reset. Returns the five
+// crisis-related fields at their default values. Used at scenario init
+// (initializeCharacter), in createInitialState, and any future "wipe
+// crisis" code path (e.g. cheats, debug tools). Centralising the shape
+// here means adding a new crisis field in the future only requires one
+// edit â€” every call site stays in sync.
+function resetCrisisState(): Pick<
+  GameState,
+  | "crisisLevel"
+  | "crisisOrigin"
+  | "crisisStartedDay"
+  | "crisisLayingLow"
+  | "prHistory"
+> {
+  return {
+    crisisLevel: 0,
+    crisisOrigin: null,
+    crisisStartedDay: null,
+    crisisLayingLow: false,
+    prHistory: [],
+  };
+}
+
 // Aggregate follower-gain multiplier based on current crisis state.
-//   * crisisLevel === 100  → 0.1× (Absolute Blackout — posts ignored)
-//   * crisisLayingLow      → 0.3× (player is silent, growth muted)
-//   * otherwise            → 1.0× (normal)
+//   * crisisLevel === 100  â†’ 0.1Ă— (Absolute Blackout â€” posts ignored)
+//   * crisisLayingLow      â†’ 0.3Ă— (player is silent, growth muted)
+//   * otherwise            â†’ 1.0Ă— (normal)
 // Blackout takes precedence over laying-low so 100 is always 0.1.
 function crisisFollowerMult(s: GameState): number {
   if (s.crisisLevel >= 100) return 0.1;
@@ -2611,7 +2628,7 @@ function rollFollowerGain(likeBoost: number, player: PlayerProfile): number {
 // and write the assignment to fanIdentityCache. Subsequent appearances
 // of the same ID reuse the cached identity, so the same handle always
 // renders consistently across days. resolveCharacter reads from the
-// cache and stays pure — population happens only at WRITE time inside
+// cache and stays pure â€” population happens only at WRITE time inside
 // the apply* reducers below. Returns either the mutated cache (new
 // entries minted) or the original reference (no-op fast path).
 function mintFanIdentities(
@@ -2621,21 +2638,21 @@ function mintFanIdentities(
   let next: GameState["fanIdentityCache"] | null = null;
   for (const id of candidateIds) {
     if (!id || id === "player") continue;
-    if (findAnyCharacter(id)) continue; // catalog member — nothing to mint
+    if (findAnyCharacter(id)) continue; // catalog member â€” nothing to mint
     if (cache[id]) continue;            // already cached
-    // djb2-ish hash → stable bucket inside anonymousFans pool.
+    // djb2-ish hash â†’ stable bucket inside anonymousFans pool.
     let h = 0;
     for (let i = 0; i < id.length; i++) {
       h = ((h << 5) - h + id.charCodeAt(i)) | 0;
     }
     const pick = anonymousFans[Math.abs(h) % anonymousFans.length];
     if (!next) next = { ...cache };
-    // Round 1.11.32 Alpha Fix #1 — pretty display.
+    // Round 1.11.32 Alpha Fix #1 â€” pretty display.
     // The technical ID stays unique for cache identity (e.g. "fan-12-mppgh6md-xzwl"
-    // — distinct from a sibling ad-hoc fan), but the RENDERED name and handle
+    // â€” distinct from a sibling ad-hoc fan), but the RENDERED name and handle
     // are pulled verbatim from the chosen anonymousFans pool entry. A small
     // 2-digit suffix on the handle disambiguates between multiple ad-hoc IDs
-    // that happen to hash to the same pool slot — so the feed shows
+    // that happen to hash to the same pool slot â€” so the feed shows
     // "@alex_vibe47" and "@alex_vibe82" rather than two identical-looking
     // accounts. Suffix is deterministic (derived from the hash), so the same
     // ad-hoc ID always renders with the same handle across sessions.
@@ -2649,7 +2666,7 @@ function mintFanIdentities(
   return next ?? cache;
 }
 
-// Round 1.11.32 Faza B — daily pool builder. Picks 6 celeb/outlet IDs from
+// Round 1.11.32 Faza B â€” daily pool builder. Picks 6 celeb/outlet IDs from
 // the player's cast + a deterministic outlet floor, and allocates 5 fan
 // slots. Total cap = 11 posts/day, matching the user-locked design. If the
 // cast is too thin to fill 6 celeb slots (e.g. Day 1 with 2 cast members),
@@ -2657,7 +2674,7 @@ function mintFanIdentities(
 // has 11 potential posts.
 //
 // Outlets (`pop-craze`, `gmz`, etc.) are folded into the celeb side because
-// they read as institutional posters in the feed — fans they are not.
+// they read as institutional posters in the feed â€” fans they are not.
 function buildDailyAuthorPool(
   castIds: string[],
   outletIds: string[],
@@ -2683,22 +2700,22 @@ function buildDailyAuthorPool(
     celebs.push(...shuffledOutlets.slice(0, needed));
     needed = CELEB_TARGET - celebs.length;
   }
-  // Roll any STILL-unfilled celeb shortfall into the fan budget — keeps
+  // Roll any STILL-unfilled celeb shortfall into the fan budget â€” keeps
   // total day cap at ~11 even when both pools are thin.
   const fanSlots = FAN_TARGET + Math.max(0, needed);
   return { celebs, fanSlots };
 }
 
-// Round 1.11.32 Faza B — ad-hoc fan handle. Each fan slot mints a fresh
+// Round 1.11.32 Faza B â€” ad-hoc fan handle. Each fan slot mints a fresh
 // pseudo-handle that the bg fetcher hands to generateSinglePost. The handle
 // is later threaded through mintFanIdentities so it gets a stable avatar +
 // display name in fanIdentityCache. Format: "fan-{day}-{epochMs}-{rand}"
-// — gives a unique deterministic-looking ID without colliding across days.
+// â€” gives a unique deterministic-looking ID without colliding across days.
 function mintAdHocFanId(day: number): string {
   return `fan-${day}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-// Pithy summary of the most recent event — pushed into currentEventContext
+// Pithy summary of the most recent event â€” pushed into currentEventContext
 // at completeEvent time. Replaces dumping the whole activityLog into the
 // single-post prompt (saves ~80-150 tokens per call). Falls back to choice
 // text when outcome is empty.
@@ -2711,168 +2728,6 @@ function buildEventSummary(args: {
   return `${args.eventTitle}: player chose "${args.choice}". ${cleanOutcome}`.slice(0, 220);
 }
 
-// Round 1.11.32 Faza B — applyWorldUpdate REMOVED. The batch world-update
-// reducer has been replaced by the streaming pre-fetch engine: each post
-// is synthesized inside the bg fetcher useEffect from a generateSinglePost
-// result, then merged into pendingBackgroundPosts. The relationship-shift
-// and notification logic that used to live here now happens lazily — small
-// per-post shifts are carried by SinglePostResult.relationshipShift; big
-// multi-character beats happen at event time via completeEvent.
-
-// Dummy block left in place only to absorb the rest of the legacy function
-// body so the file's structure stays parseable. Compiled away as dead JS.
-function _unusedLegacyApplyWorldUpdate(s: GameState, update: { relationshipShifts: Array<{ characterId: string; delta: number; reason: string }>; posts: Array<{ characterId: string; text: string; threadReplies?: Array<{ characterId: string; text: string }> }>; notifications?: Array<{ charactersInvolved: string[]; headline: string; preview: string }>; playerStatChanges?: { humor?: number; aura?: number } }, attachedPostId?: string): GameState {
-  let contacts = { ...s.contacts };
-  const relationshipDeltas: WorldUpdateToast["relationshipDeltas"] = [];
-  for (const shift of update.relationshipShifts) {
-    const c = contacts[shift.characterId];
-    if (!c) continue;
-    const newVibe = Math.max(-100, Math.min(100, c.vibe + shift.delta));
-    const moodInfo = moodFor(newVibe);
-    contacts[shift.characterId] = {
-      ...c,
-      vibe: newVibe,
-      vibeDelta: shift.delta,
-      vibeReason: shift.reason,
-      currentFeeling: { headline: moodInfo.headline, detail: moodInfo.detail },
-      mood: { label: moodInfo.label, reason: moodInfo.detail, delta: shift.delta },
-    };
-    relationshipDeltas.push({
-      characterId: shift.characterId,
-      direction: shift.delta >= 0 ? "up" : "down",
-    });
-  }
-  const baseId = Date.now();
-  const newPosts: FeedPost[] = update.posts.map((p, postIdx) => {
-    const characterId = p.characterId;
-    // Resolve the post author's followers so we can scale both the post's
-    // own likes and each reply's likes off the real follower base.
-    // findAnyCharacter spans celebs + outlets + fans; fans / outlets fall
-    // to 0 → fan-tier or 10k-50k fallback in rollPostLikes.
-    const postAuthorSrc = findAnyCharacter(characterId);
-    const postAuthorFollowers =
-      postAuthorSrc && "followers" in postAuthorSrc && typeof postAuthorSrc.followers === "number"
-        ? postAuthorSrc.followers
-        : 0;
-    // Round 1.11.25 — threadReplies are now generated CLIENT-SIDE for AI
-    // posts. The AI contract no longer includes them (saves ~210-525 tokens
-    // per call, eliminates MAX_TOKENS truncation pattern). buildOffline
-    // world-update path still pre-fills threadReplies inline, so we honor
-    // them if present; only synthesize when AI returned a bare post.
-    const rawReplies =
-      p.threadReplies && p.threadReplies.length > 0
-        ? p.threadReplies
-        : buildScenarioThreadReplies(
-            s.selectedWorldId,
-            3 + Math.floor(Math.random() * 3), // 3-5 scenario-aware fan replies
-          );
-    const threadReplies = rawReplies.map((r, i) => {
-      const rSrc = findAnyCharacter(r.characterId);
-      const rFollowers =
-        rSrc && "followers" in rSrc && typeof rSrc.followers === "number"
-          ? rSrc.followers
-          : 0;
-      return {
-        id: `tr-${baseId}-${postIdx}-${i}`,
-        authorId: r.characterId,
-        text: r.text,
-        // Tiered + follower-scaled. Fans stay realistic (0-150), celebs
-        // match cinematic reach (0.02-0.2% normal, 0.1-0.5% viral).
-        likes: rollReplyLikes(r.characterId, rFollowers),
-        createdAt: nowLabel(),
-      };
-    });
-    return {
-      id: `gen-${baseId}-${characterId}-${Math.random().toString(36).slice(2, 6)}`,
-      authorId: characterId,
-      text: p.text,
-      // Reply count is authoritative on the array length now — no phantom counters.
-      replies: threadReplies.length,
-      reposts: `${(Math.random() * 50 + 1).toFixed(1)}K`,
-      // Tiered post likes (cinematic). Fans 0-150 (5% viral to 700).
-      // Outlets / 0-follower 10k-50k. Celebs 3-15% / 12-40% viral of followers.
-      likes: rollPostLikes(characterId, postAuthorFollowers),
-      threadReplies,
-      createdAt: nowLabel(),
-      day: s.day,
-    };
-  });
-  // Round 1.11.25 — notifications DERIVED client-side from relationshipShifts.
-  // AI contract no longer includes them (saves ~50-100 tokens per call). We
-  // compose a single multi-character notification summarising who reacted,
-  // using the first shift's reason as the preview (with @mentions colored
-  // blue at render time by AlertsScreen). Backward compat: also honor any
-  // notifications the offline path or legacy AI response sent inline.
-  const aiNotifications: NotificationItem[] = (update.notifications ?? []).map((n) => ({
-    id: `n-${baseId}-${Math.random().toString(36).slice(2, 6)}`,
-    postId: attachedPostId,
-    charactersInvolved: n.charactersInvolved,
-    headline: n.headline,
-    preview: n.preview,
-    createdAt: nowLabel(),
-  }));
-  let derivedNotification: NotificationItem | null = null;
-  if (aiNotifications.length === 0 && update.relationshipShifts.length > 0) {
-    const involved = update.relationshipShifts.slice(0, 4).map((sh) => sh.characterId);
-    const names = involved
-      .map((id) => catalogCharacters.find((c) => c.id === id)?.name?.split(" ")[0])
-      .filter((n): n is string => !!n);
-    const headlineNames =
-      names.length === 0
-        ? "Your contacts"
-        : names.length === 1
-          ? names[0]
-          : names.length === 2
-            ? `${names[0]} and ${names[1]}`
-            : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
-    derivedNotification = {
-      id: `n-${baseId}-derived-${Math.random().toString(36).slice(2, 6)}`,
-      postId: attachedPostId,
-      charactersInvolved: involved,
-      headline: `${headlineNames} reacted to your day`,
-      preview: update.relationshipShifts[0]?.reason ?? "",
-      kind: "post-reply",
-      createdAt: nowLabel(),
-    };
-  }
-  const notifications: NotificationItem[] = derivedNotification
-    ? [derivedNotification, ...aiNotifications]
-    : aiNotifications;
-  // Apply socialPresence shifts from the AI directly so the Profile gauges actually move.
-  const player = update.playerStatChanges
-    ? {
-        ...s.player,
-        socialPresence: {
-          humor: Math.max(
-            0,
-            Math.min(100, s.player.socialPresence.humor + (update.playerStatChanges.humor ?? 0)),
-          ),
-          aura: Math.max(
-            0,
-            Math.min(100, s.player.socialPresence.aura + (update.playerStatChanges.aura ?? 0)),
-          ),
-        },
-      }
-    : s.player;
-  // Mint identities for any AI-hallucinated fan IDs that just landed in
-  // the feed (post authors + their thread reply authors). This is the
-  // WRITE-time hook: resolveCharacter will see them on the next render
-  // without doing any setState itself.
-  const candidateIds: string[] = [];
-  for (const p of update.posts) candidateIds.push(p.characterId);
-  for (const p of newPosts) {
-    for (const tr of p.threadReplies) candidateIds.push(tr.authorId);
-  }
-  const fanIdentityCache = mintFanIdentities(s.fanIdentityCache, candidateIds);
-  return {
-    ...s,
-    player,
-    contacts,
-    posts: [...newPosts, ...s.posts],
-    notifications: [...notifications, ...s.notifications],
-    fanIdentityCache,
-  };
-}
 
 function applyPostReplies(
   s: GameState,
@@ -2897,14 +2752,17 @@ function applyPostReplies(
     };
   }
   const baseTime = Date.now();
-  // Round 1.11.32 Faza D — Emergent Defense likes multiplier. When the
-  // player is in crisis (level > 40), fan replies get +2.5× likes —
-  // simulates the "viral defense" UX where the supportive crowd's
-  // comments rocket up the engagement column and visibly outweigh the
-  // hate. Applied to FAN-tier authors only (anonymousFanIds + ad-hoc
-  // fan IDs that minted into the cache); celebs already get massive
-  // base likes via rollReplyLikes follower scaling.
-  const defenseMult = s.crisisLevel > 40 ? 2.5 : 1;
+  // Round 1.11.32 Faza E â€” PRECISE Stan Wars defender multiplier.
+  // Earlier Faza D implementation rewarded ALL fan replies during crisis
+  // â€” including hostile pile-on accounts â€” turning what should be a
+  // "viral defense lifts the player" mechanic into "viral chaos".
+  // The new rule fires +2.5Ă— likes ONLY when ALL three conditions hold:
+  //   1. crisisLevel > 40
+  //   2. reply author is a fan (anonymousFanIds OR ad-hoc fan in cache)
+  //   3. AI tagged the reply with tone === "defense"
+  // Missing tone / "attack" / "neutral" all degrade to the base 1Ă— â€”
+  // safe fallback if the model hallucinates the tone field.
+  const crisisActive = s.crisisLevel > 40;
   const newReplies: ThreadReply[] = (result.replies ?? []).map((r, i) => {
     const rSrc = findAnyCharacter(r.characterId);
     const rFollowers =
@@ -2914,7 +2772,8 @@ function applyPostReplies(
     const baseLikes = rollReplyLikes(r.characterId, rFollowers);
     const isFanAuthor =
       anonymousFanIds.includes(r.characterId) || !!s.fanIdentityCache[r.characterId];
-    const likes = isFanAuthor ? Math.floor(baseLikes * defenseMult) : baseLikes;
+    const isDefender = crisisActive && isFanAuthor && r.tone === "defense";
+    const likes = isDefender ? Math.floor(baseLikes * 2.5) : baseLikes;
     return {
       id: `tr-${baseTime}-${i}`,
       authorId: r.characterId,
@@ -2925,12 +2784,12 @@ function applyPostReplies(
     };
   });
   // Player-engagement bump: every refresh that processes a post-replies action
-  // ALSO dosypuje lajki pod istniejącymi komentarzami gracza w tym poście.
+  // ALSO dosypuje lajki pod istniejÄ…cymi komentarzami gracza w tym poĹ›cie.
   // Skala = humor + aura (z socialPresence). Day-1 floor of 5 keeps the first
   // refresh from feeling completely dead. Without this, player's own replies
-  // sit at 0 likes forever — applyPostReplies used to pass them through
+  // sit at 0 likes forever â€” applyPostReplies used to pass them through
   // untouched via `...p.threadReplies`.
-  // Round 1.11.32 Alpha Fix #5 — bumpPlayerReplyLikes replaces the older
+  // Round 1.11.32 Alpha Fix #5 â€” bumpPlayerReplyLikes replaces the older
   // playerEngagement formula. The old version capped early-game growth at
   // 0-2 likes/refresh because it depended only on humor+aura (which Day 1
   // sit at 0/0). The new helper folds in followers + presence so player
@@ -2985,7 +2844,7 @@ function applyPostReplies(
           : `${headlineNames.slice(0, -1).join(", ")} and ${headlineNames[headlineNames.length - 1]} replied`;
 
   // Notification headline uses FULL names + "and N other(s)" suffix to mirror
-  // the original Status format: "Ariana Grande, Beyoncé, Speed and one other
+  // the original Status format: "Ariana Grande, BeyoncĂ©, Speed and one other
   // replied to you" / "Tyler, The Creator, Sabrina Carpenter and 3 others...".
   const notifFullNames = namedReplies.slice(0, 3).map((r) => r.fullName);
   const notifMoreCount = Math.max(0, namedReplies.length - notifFullNames.length);
@@ -3004,7 +2863,7 @@ function applyPostReplies(
           ? `${notifFullNames.join(", ")}${otherSuffix} replied to you`
           : `${notifFullNames.slice(0, -1).join(", ")} and ${notifFullNames[notifFullNames.length - 1]} replied to you`;
 
-  // Preview line — prepend the replier's name + colon + their reply text,
+  // Preview line â€” prepend the replier's name + colon + their reply text,
   // matching the original ("Ariana Grande: @ishowspeed please let him breathe").
   // @mentions inside the text are highlighted blue at render time by AlertsScreen.
   const firstReply = result.replies?.[0];
@@ -3027,11 +2886,11 @@ function applyPostReplies(
     : null;
 
   // Player follower growth (Round 1.10). Every applyPostReplies refresh
-  // gives the player some followers — scaled by likeBoost from the AI/fallback
+  // gives the player some followers â€” scaled by likeBoost from the AI/fallback
   // and modulated by their Humor+Aura presence. Minimum 50 per refresh so the
   // counter always visibly moves.
-  // Round 1.11.32 Faza D — crisisFollowerMult throttles growth when the
-  // player is laying low (0.3×) or in absolute blackout (0.1×). Applied
+  // Round 1.11.32 Faza D â€” crisisFollowerMult throttles growth when the
+  // player is laying low (0.3Ă—) or in absolute blackout (0.1Ă—). Applied
   // BEFORE the floor so a 50-follower base under blackout becomes 5,
   // matching the "you're invisible right now" UX.
   const followerGain = Math.floor(
@@ -3054,8 +2913,8 @@ function applyPostReplies(
         },
       }
     : { ...s.player, followers: s.player.followers + followerGain };
-  // Round 1.11 — rich relationship cards for the expanded toast panel.
-  // Each card needs: characterId, decimal Δ%, rationale text (we already
+  // Round 1.11 â€” rich relationship cards for the expanded toast panel.
+  // Each card needs: characterId, decimal Î”%, rationale text (we already
   // have shift.reason from the AI), and vibeAfter so the CenteredBar can
   // be positioned. vibeAfter = (the contact's NEW vibe after we applied
   // shift.delta above). We computed `contacts` already so re-read it.
@@ -3073,13 +2932,13 @@ function applyPostReplies(
     .filter((x): x is NonNullable<typeof x> => x !== null)
     .slice(0, 5);
   // Mint identities for any AI-hallucinated fan IDs in this batch of
-  // replies. Same WRITE-time hook as applyWorldUpdate — keeps
+  // replies. Same WRITE-time hook as applyWorldUpdate â€” keeps
   // resolveCharacter pure.
   const fanIdentityCache = mintFanIdentities(
     s.fanIdentityCache,
     newReplies.map((r) => r.authorId),
   );
-  // Round 1.11.32 Faza D — crisis detection on relationship-drop. If any
+  // Round 1.11.32 Faza D â€” crisis detection on relationship-drop. If any
   // contact JUST crossed below -50, transition state into crisis (or
   // amplify if already in crisis). +25 base bump scales the meter
   // visibly off a single feud spike. We pass the new contacts (post-shift)
@@ -3102,14 +2961,14 @@ function applyPostReplies(
       id: `t-${baseTime}`,
       headline: replyHeadline,
       body: result.replies?.[0]?.text ?? "",
-      // Pithy slogan body — post-replies result doesn't carry a summary from
+      // Pithy slogan body â€” post-replies result doesn't carry a summary from
       // the AI, so first sentence of the body is used as the collapsed line.
       followerDelta: followerGain,
       // Decimal stat shifts from playerStatChanges (now -2..2 with .1 precision).
       humorDelta: result.playerStatChanges?.humor,
       auraDelta: result.playerStatChanges?.aura,
       relationshipChanges,
-      // Legacy compact arrays — still populated for any old code path that
+      // Legacy compact arrays â€” still populated for any old code path that
       // reads them. New UI prefers humorDelta/auraDelta/relationshipChanges.
       presenceDeltas: (result.relationshipShifts ?? [])
         .slice(0, 2)
