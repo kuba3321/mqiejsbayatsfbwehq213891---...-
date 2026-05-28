@@ -11,6 +11,41 @@ export type Provider = "openai" | "anthropic" | "gemini";
 // shape expo-image's <Image source={...} /> expects.
 export type AvatarSource = string | number;
 
+// Round 1.11.32 Faza D — Stan Wars & Cancel Culture
+//
+// `crisisLevel` (0-100) drives a coupled set of mechanics:
+//   * 0   = no crisis, normal game flow
+//   * >0  = AI prompts pick up the "current crisis" block
+//   * >20 = crisis context starts shipping inside generateSinglePost
+//   * >40 = applyPostReplies activates emergent fan defense (high-vibe
+//          fans write DEFENSIVE replies with +2.5× likes mult)
+//   * 100 = "blackout" — all player posts are essentially invisible
+//          (-90% follower gain) until a successful PR action drops level
+//
+// Crisis origin lets the UI explain why the player is on fire and
+// thread the cause into PR Stunt prompts.
+export type CrisisOrigin =
+  | { kind: "relationship-drop"; characterId: string; vibe: number }
+  | { kind: "event-misstep"; eventTitle: string; choice: string }
+  | { kind: "ai-toxicity"; reason: string };
+
+// Three player-driven exits from a crisis. PR Stunt drops level for a
+// stat cost. Laying Low passively decays the meter faster but throttles
+// follower growth. Divert sacrifices another celeb's vibe for a massive
+// crisis dump + a priority Pop Craze post on the feed.
+export type CrisisAction = "pr-stunt" | "laying-low" | "divert";
+
+// Single PR move on offer in the PRActionsModal. Drawn from AI when the
+// network's healthy, falls back to an offline bank when it's not.
+export type PRStuntOption = {
+  id: string;
+  title: string;
+  description: string;
+  humorCost: number; // 0..3, decimal
+  auraCost: number;  // 0..3, decimal
+  effect: number;    // crisis-level points removed, 15..50
+};
+
 export type GamePhase =
   | "landing"
   | "hub"
@@ -349,4 +384,28 @@ export type GameState = {
   // consecutive failures the WorldUpdateToast surfaces a "Network
   // hiccup" notice; backoff window grows 5s → 15s → 60s.
   lastBackgroundFetchError: { at: number; tries: number } | null;
+
+  // ===== Round 1.11.32 Faza D — Stan Wars & Cancel Culture =====
+  // 0..100. 0 = no crisis. completeEvent and applyPostReplies / the bg
+  // fetcher can push it up; PR actions and natural decay push it down.
+  crisisLevel: number;
+  // Context that started the current crisis — populated when level
+  // transitions 0→positive, cleared when it falls back to 0. Drives the
+  // PR Stunt prompt and the CrisisBar tooltip.
+  crisisOrigin: CrisisOrigin | null;
+  // Day the crisis began. Used for narrative ("3 days into the storm").
+  crisisStartedDay: number | null;
+  // Toggle for "laying low" mode — when true, day-rollover decay
+  // accelerates -8/day and post/event followerGain multiplies by 0.3.
+  // Independent of crisis duration; player can toggle on/off freely.
+  crisisLayingLow: boolean;
+  // Rolling log of past PR moves (cap 20 entries via .slice(-20)).
+  // Drives Divert cooldown (no spamming the same target every day) and
+  // gives the AI prompt history when generating fresh stunt options.
+  prHistory: Array<{
+    day: number;
+    action: CrisisAction;
+    targetId?: string;
+    effect: string;
+  }>;
 };

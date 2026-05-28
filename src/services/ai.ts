@@ -5,7 +5,9 @@ import {
   Character,
   ChatMessage,
   ContactState,
+  CrisisOrigin,
   PlayerProfile,
+  PRStuntOption,
   Provider,
   ScoreChange,
   World,
@@ -1652,6 +1654,22 @@ export async function generateSinglePost(args: {
   character?: Character;        // catalog/cast entry; undefined for fan slot
   contactChemistry?: string;    // chemistry label with player, for celeb voice tuning
   recentPlayerActions?: string[]; // last 2-3 only — keep prompt small
+  // Round 1.11.32 Alpha Fix #4 — list of celeb IDs from the player's
+  // active cast that the AI MAY pick as cross-commenters under the
+  // current post's threadReplies. Industry drama only works when stars
+  // talk to stars; without this list the prompt locked replies to the
+  // anonymous fan pool exclusively.
+  castCelebIds?: string[];
+  // Round 1.11.32 Faza D — crisis context block. Only injected into the
+  // prompt when `level > 20` (saves tokens on calm-day generation). When
+  // present, tells the AI to weave defense/escalation into the post's
+  // tone and the threadReplies based on who has what vibe with the
+  // player. See `crisisPromptBlock` below for the exact wording.
+  crisisContext?: {
+    level: number;
+    layingLow: boolean;
+    originCharacterId?: string; // for "relationship-drop" → highlight in prompt
+  };
 }): Promise<SinglePostResult> {
   const fanLineBank =
     scenarioFanPostBanks[args.world.id] ?? offlineFanPostBank;
@@ -1690,22 +1708,61 @@ Write a single in-character 1-2 sentence feed post.`
       ? `Last player actions: ${args.recentPlayerActions.slice(-2).join(" | ")}`
       : "";
 
+  // Round 1.11.32 Faza D — crisis prompt block. Token-gated by the
+  // `level > 20` threshold (already enforced by the caller, but we add
+  // a belt here). Defensive vs hostile split is described in plain
+  // language; the actual likes-multiplier on defensive replies happens
+  // client-side in applyPostReplies.
+  const crisisPromptBlock =
+    args.crisisContext && args.crisisContext.level > 20
+      ? `
+
+CURRENT CRISIS — player is at crisisLevel ${args.crisisContext.level}/100${
+          args.crisisContext.originCharacterId
+            ? ` after a public feud with @${args.crisisContext.originCharacterId}`
+            : ""
+        }.
+Reply behavior changes:
+- Fans with HIGH vibe (>60) toward the player MUST defend in their replies:
+  "leave them alone", "the discourse is exhausting", "stop reaching".
+- Hostile / hater-coded fans escalate the drama:
+  "this confirms everything", "the spiral is accelerating", "imagine still defending this".
+- Celebs in the cross-commenter pool pick a side based on chemistry — friends defend, rivals/enemies pile on.
+${args.crisisContext.layingLow ? "Player is LAYING LOW — do NOT @-mention them in the post or replies; let the crowd argue without them." : ""}`
+      : "";
+
   const system = `${personaBlock}
 
 Scenario: ${args.world.title}. ${args.world.setting ?? args.world.description}.
 ${eventBlock}
-${recentBlock}
+${recentBlock}${crisisPromptBlock}
+
+REPLY AUTHOR POOLS:
+- Fan pool (use these for crowd reactions):
+  ${anonymousFanIds.slice(0, 6).join(", ")}
+- Celeb cross-commenters (other stars from the active cast — pick MAX 1-2 per post to weave in branżowe interakcje):
+  ${
+    args.castCelebIds && args.castCelebIds.filter((id) => id !== args.characterId).length > 0
+      ? args.castCelebIds.filter((id) => id !== args.characterId).join(", ")
+      : "(no other celebs available)"
+  }
 
 Return STRICT JSON only, no commentary:
 {
   "text": "<the post text>",
   "threadReplies": [
-    { "characterId": "<a fan handle from this pool: ${anonymousFanIds.slice(0, 6).join(", ")}>", "text": "<short 1-sentence reaction>" }
+    { "characterId": "<fan handle OR celeb id from pools above>", "text": "<short 1-sentence reaction>" }
   ],
   "relationshipShift": null
 }
 
-Generate 3-5 threadReplies for a celeb post, 2-3 for a fan post. Reply authors should mostly be from the fan pool above; one celeb reply is fine if the chemistry justifies it. Keep replies short and chaotic — they're the crowd, not press releases.`;
+Generate 3-5 threadReplies for a celeb post, 2-3 for a fan post. Mix authors:
+- ~60-80% from the fan pool — anonymous chaos
+- ~20-40% from the celeb cross-commenter pool when their chemistry with the
+  post's author makes it dramatic (a rival drops a passive-aggressive jab,
+  a friend amplifies, a lover throws a cryptic emoji). Cross-comments are
+  the engine of industry drama — USE them when they make narrative sense.
+Never pick the post's own author as a replier. Keep all replies short and chaotic — crowd energy, not press releases.`;
 
   try {
     const text = await runLLM(args.player, {
@@ -1751,6 +1808,202 @@ Generate 3-5 threadReplies for a celeb post, 2-3 for a fan post. Reply authors s
     fanLineBank,
     fanCommentBank,
   });
+}
+
+// ---------------- PR Stunt options (Round 1.11.32 Faza D) ----------------
+// PRStuntOption type lives in @/data/types — imported above.
+
+// Offline bank — 12 generic stunts that always read OK regardless of
+// scenario or origin. Used when no API key OR the AI call fails. The
+// `effect` numbers are clamped to the 15-50 band documented in the GDD;
+// `humorCost`/`auraCost` mirror the "small move = small cost" curve.
+const offlinePRStuntBank: PRStuntOption[] = [
+  {
+    id: "stunt-apology-post",
+    title: "Carefully-worded apology post",
+    description: "Acknowledge the misunderstanding without admitting fault. Tag the PR team.",
+    humorCost: 0,
+    auraCost: 2.0,
+    effect: 30,
+  },
+  {
+    id: "stunt-gym-paparazzi",
+    title: "Photographed leaving the gym at 6am",
+    description: "Sweat + sunrise = redemption arc starter pack.",
+    humorCost: 0,
+    auraCost: 0,
+    effect: 22,
+  },
+  {
+    id: "stunt-twitch-stream",
+    title: "Stream a Twitch apology that goes off the rails",
+    description: "High-risk, high-reward. Could be iconic or career-ending.",
+    humorCost: 2.5,
+    auraCost: 1.5,
+    effect: 45,
+  },
+  {
+    id: "stunt-charity-pledge",
+    title: "Announce a six-figure charity pledge",
+    description: "Optically immaculate. Cynics will sniff but headlines will pivot.",
+    humorCost: 0,
+    auraCost: 0.5,
+    effect: 38,
+  },
+  {
+    id: "stunt-cryptic-tweet",
+    title: "Drop one cryptic tweet, then go silent",
+    description: "Two words, full ambiguity. Let the stans run interference.",
+    humorCost: 1.0,
+    auraCost: 0,
+    effect: 18,
+  },
+  {
+    id: "stunt-podcast-tour",
+    title: "Book a hostile podcast and turn the charm on",
+    description: "Walk into the lion's den. If you live, you win.",
+    humorCost: 1.5,
+    auraCost: 2.0,
+    effect: 42,
+  },
+  {
+    id: "stunt-fashion-pivot",
+    title: "New era visual reset — all black, no posts",
+    description: "Disappear from feeds for 36 hours, reappear with a moodboard.",
+    humorCost: 0,
+    auraCost: 0,
+    effect: 25,
+  },
+  {
+    id: "stunt-receipts-leak",
+    title: "Leak the receipts to a friendly outlet",
+    description: "Anonymous tip → exclusive scoop. Risky if the receipts are weak.",
+    humorCost: 0.5,
+    auraCost: 1.5,
+    effect: 35,
+  },
+  {
+    id: "stunt-collab-tease",
+    title: "Tease a surprise collab with a wholesome icon",
+    description: "Image-laundering 101. Don't have to deliver, just have to post.",
+    humorCost: 0.5,
+    auraCost: 0.5,
+    effect: 28,
+  },
+  {
+    id: "stunt-public-therapy",
+    title: "Talk about going to therapy in a long caption",
+    description: "Vulnerable, real, mockery-proof. The girlies will rally.",
+    humorCost: 1.0,
+    auraCost: 0,
+    effect: 32,
+  },
+  {
+    id: "stunt-no-comment",
+    title: "Issue a 'no further comment' through your team",
+    description: "Stiff, lawyered, predictable. Quiet drop in temperature.",
+    humorCost: 0,
+    auraCost: 1.0,
+    effect: 15,
+  },
+  {
+    id: "stunt-statement-thread",
+    title: "Six-tweet statement thread at 11:59pm",
+    description: "Schedule it perfectly. By morning, the news cycle has moved.",
+    humorCost: 0.5,
+    auraCost: 2.5,
+    effect: 40,
+  },
+];
+
+function pickOfflinePRStunts(count = 3): PRStuntOption[] {
+  // Deterministic shuffle slice — avoid duplicates across one open of
+  // the modal. Each call produces a fresh order so the player isn't
+  // shown the same trio every crisis.
+  const pool = [...offlinePRStuntBank];
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, count);
+}
+
+export async function generatePRStuntOptions(args: {
+  player: PlayerProfile;
+  world: World;
+  crisisOrigin: CrisisOrigin | null;
+  crisisLevel: number;
+  recentActions?: string[];
+}): Promise<PRStuntOption[]> {
+  if (!args.player.apiKey.trim()) return pickOfflinePRStunts(3);
+
+  const originDescription = args.crisisOrigin
+    ? args.crisisOrigin.kind === "relationship-drop"
+      ? `Public feud with @${args.crisisOrigin.characterId} (vibe ${args.crisisOrigin.vibe})`
+      : args.crisisOrigin.kind === "event-misstep"
+        ? `Misstep during "${args.crisisOrigin.eventTitle}" — chose: ${args.crisisOrigin.choice}`
+        : `AI-flagged toxicity: ${args.crisisOrigin.reason}`
+    : "Generic image dip";
+
+  const system = `You are the celebrity PR strategist for a social media simulator.
+Scenario: ${args.world.title}. ${args.world.setting ?? args.world.description}.
+Current crisis: ${originDescription}. crisisLevel ${args.crisisLevel}/100.
+
+Generate THREE distinct PR Stunt options the player can pick from to defuse the drama. Each option is a JSON object with:
+{
+  "title": "<5-9 word headline of the move>",
+  "description": "<one sentence flavor + risk>",
+  "humorCost": <decimal 0..3 — how much Humor the move burns>,
+  "auraCost": <decimal 0..3 — how much Aura the move burns>,
+  "effect": <integer 15..50 — crisisLevel reduction>
+}
+
+Examples (few-shot):
+=> { "title": "Carefully-worded apology post", "description": "Acknowledge the misunderstanding without admitting fault.", "humorCost": 0, "auraCost": 2.5, "effect": 35 }
+=> { "title": "Photographed leaving the gym at 6am", "description": "Sweat + sunrise = redemption arc starter pack.", "humorCost": 0, "auraCost": 0, "effect": 22 }
+=> { "title": "Stream a Twitch apology that goes off the rails", "description": "High-risk, high-reward. Could be iconic or career-ending.", "humorCost": 3, "auraCost": 1.5, "effect": 50 }
+
+Return STRICT JSON only:
+{ "options": [ { ... }, { ... }, { ... } ] }
+
+Make the three options PERSPIRED to the crisis cause — different tones (humble vs aggressive vs cryptic), different cost profiles (cheap + small vs expensive + big), different vibes. Never repeat the same idea twice.`;
+
+  try {
+    const text = await runLLM(args.player, {
+      system,
+      messages: [{ role: "user", content: "Generate the 3 options now." }],
+      maxTokens: 700,
+      temperature: 0.85,
+      jsonResponse: true,
+    });
+    const parsed = safeParseJSON(text);
+    if (parsed && Array.isArray(parsed.options)) {
+      const opts = (parsed.options as Array<Partial<PRStuntOption>>)
+        .filter(
+          (o): o is PRStuntOption =>
+            !!o &&
+            typeof o.title === "string" &&
+            typeof o.description === "string" &&
+            typeof o.humorCost === "number" &&
+            typeof o.auraCost === "number" &&
+            typeof o.effect === "number",
+        )
+        .slice(0, 3)
+        .map((o, i) => ({
+          ...o,
+          id: `stunt-ai-${Date.now()}-${i}`,
+          // Clamp into the agreed band.
+          humorCost: Math.max(0, Math.min(3, o.humorCost)),
+          auraCost: Math.max(0, Math.min(3, o.auraCost)),
+          effect: Math.max(15, Math.min(50, Math.round(o.effect))),
+        }));
+      if (opts.length > 0) return opts;
+    }
+    console.warn(`[ai] generatePRStuntOptions: parse failed (len=${text.length}).`);
+  } catch (err) {
+    console.warn("[ai] generatePRStuntOptions failed, falling back to offline:", err);
+  }
+  return pickOfflinePRStunts(3);
 }
 
 // ---------------- Post replies ----------------
@@ -1975,6 +2228,14 @@ export async function generatePostReplies(args: {
   replyMode?: boolean;
   originalAuthor?: string;
   contextReplyText?: string;
+  // Round 1.11.32 Faza D — emergent fan defense protocol activates when
+  // the player is in crisis. Same shape as the bg fetcher's crisisContext;
+  // only injected into the prompt when level > 20.
+  crisisContext?: {
+    level: number;
+    layingLow: boolean;
+    originCharacterId?: string;
+  };
 }): Promise<PostRepliesResult | null> {
   // Round 1.11.15 — no API key OR empty cast → offline fallback. Empty cast
   // no longer returns null; buildOfflinePostReplies produces fan-only replies
@@ -2003,6 +2264,35 @@ ${contactList}
 
 ANONYMOUS FAN / STAN ACCOUNTS available (use these exact ids):
 ${anonymousFanIds.join(", ")}
+${
+  args.crisisContext && args.crisisContext.level > 20
+    ? `
+
+EMERGENT FAN DEFENSE PROTOCOL — player is at crisisLevel ${args.crisisContext.level}/100${
+        args.crisisContext.originCharacterId
+          ? ` after public feud with @${args.crisisContext.originCharacterId}`
+          : ""
+      }.
+Fans/celebs with vibe > 60 MUST defend the player in their replies. Few-shot examples for DEFENSIVE replies:
+- "this take is so reaching i can't even"
+- "the way y'all jump on @${args.player.handle.replace(/^@/, "")} for ANYTHING"
+- "literally just let them breathe for 30 seconds"
+- "the receipts for this drama don't exist"
+- "yall do this every cycle and it's so old"
+
+Hostile fans / low-vibe accounts escalate:
+- "this confirms everything i said yesterday"
+- "the spiral is accelerating"
+- "imagine still defending this"
+- "the receipts don't lie even if you do"
+
+Distribution scales with crisisLevel:
+- 20-40 → 70% defenders / 30% escalators
+- 40-70 → 50/50 split
+- 70+   → 30% defenders / 70% escalators (the hate is louder)
+${args.crisisContext.layingLow ? "Player is LAYING LOW — fans defending should add 'leave them alone they're laying low'-style lines." : ""}`
+    : ""
+}
 
 THE POST YOU ARE REACTING TO:
 """

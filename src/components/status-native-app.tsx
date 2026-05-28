@@ -62,6 +62,7 @@ import {
   ChemistryType,
   FeedPost,
   GameTab,
+  PRStuntOption,
   Provider,
   SkillKey,
   WorldDifficulty,
@@ -782,6 +783,9 @@ function GameShell() {
       <EventModal />
       <WorldUpdateToast />
       <PostDetailModal />
+      {/* Round 1.11.32 Faza D — PR Actions modal mounted at shell level
+          so any screen can open it (CrisisBar tap, future toast CTAs). */}
+      <PRActionsModal />
     </View>
   );
 
@@ -860,7 +864,65 @@ function FeedHeader() {
           <Store color={colors.muted2} size={18} />
         </IconButton>
       </View>
+      {/* Round 1.11.32 Faza D — CrisisBar slides in below the Day chip
+          whenever the player is on fire. Tappable → opens PRActionsModal. */}
+      <CrisisBar />
     </View>
+  );
+}
+
+// Round 1.11.32 Faza D — visible only when crisisLevel > 0. Renders a
+// red pill with the meter value + a tiny "PR →" CTA on the right. At
+// level ≥ 70 the background shifts to a louder red gradient. The whole
+// pill is the press target.
+function CrisisBar() {
+  const { state, setPRActionsOpen } = useGame();
+  if (state.crisisLevel <= 0) return null;
+  const blackout = state.crisisLevel >= 100;
+  const critical = state.crisisLevel >= 70;
+  const layingLow = state.crisisLayingLow;
+  return (
+    <Pressable
+      onPress={() => setPRActionsOpen(true)}
+      style={({ pressed }) => ({
+        marginTop: 10,
+        paddingHorizontal: 14,
+        paddingVertical: 10,
+        borderRadius: 14,
+        backgroundColor: blackout
+          ? "#5a1212"
+          : critical
+            ? "#7a1a1a"
+            : "#3b1a1a",
+        borderWidth: 1,
+        borderColor: blackout ? "#ff4d4d" : critical ? "#ff7a7a" : "#a64242",
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 10,
+        opacity: pressed ? 0.85 : 1,
+      })}
+    >
+      <AppText size={18}>{blackout ? "🚨" : critical ? "🔥" : "⚠️"}</AppText>
+      <View style={{ flex: 1 }}>
+        <AppText size={13} weight="900" color="#ffd7d7">
+          {blackout
+            ? "ABSOLUTE BLACKOUT"
+            : layingLow
+              ? `Crisis ${Math.round(state.crisisLevel)}/100 · Laying low`
+              : `Crisis ${Math.round(state.crisisLevel)}/100`}
+        </AppText>
+        <AppText size={11} color="#f3a8a8" numberOfLines={1}>
+          {state.crisisOrigin?.kind === "relationship-drop"
+            ? `Beef with @${state.crisisOrigin.characterId}`
+            : state.crisisOrigin?.kind === "event-misstep"
+              ? state.crisisOrigin.eventTitle
+              : "Tap to open PR menu"}
+        </AppText>
+      </View>
+      <AppText size={13} weight="900" color="#ffd7d7">
+        PR →
+      </AppText>
+    </Pressable>
   );
 }
 
@@ -970,7 +1032,7 @@ function FeedScreen() {
           position: "absolute",
           left: 0,
           right: 0,
-          bottom: 96,
+          bottom: 116,
           alignItems: "center",
         }}
       >
@@ -1012,7 +1074,7 @@ function FeedScreen() {
         style={({ pressed }) => ({
           position: "absolute",
           right: 18,
-          bottom: 96,
+          bottom: 116,
           width: 56,
           height: 56,
           borderRadius: 28,
@@ -4553,14 +4615,21 @@ function PostDetailModal() {
 
         <KeyboardAvoidingView
           behavior="padding"
+          // Round 1.11.32 Alpha Fix #7 — bottom reply composer was getting
+          // clipped on iPhones with home-indicator gestures. Bumped
+          // paddingTop 10→14 and paddingBottom from `insets.bottom + 10`
+          // to `insets.bottom + 24` so the "Post" button + "Add a boost"
+          // dashed pill always sit above the gesture area, regardless of
+          // keyboard state. KeyboardAvoidingView still handles the
+          // up-shift when the input focuses.
           style={{
             position: "absolute",
             left: 0,
             right: 0,
             bottom: 0,
             paddingHorizontal: 14,
-            paddingTop: 10,
-            paddingBottom: insets.bottom + 10,
+            paddingTop: 14,
+            paddingBottom: insets.bottom + 24,
             backgroundColor: colors.surfaceDeep,
             borderTopColor: colors.divider,
             borderTopWidth: 1,
@@ -4657,14 +4726,14 @@ function WorldUpdateToast() {
   // Round 1.11.32 — animated slide-down from the top, system-push style.
   // The toast now lives anchored to the safe-area top inset (+8 px breathing
   // room) so Notch / Dynamic Island / status bar can never overlap text.
-  // translateY starts above the screen (-240) and springs into place when a
+  // translateY starts above the screen (-700) and springs into place when a
   // new toast appears; dismiss runs the spring in reverse before clearing
   // state.
-  const slide = useRef(new Animated.Value(-240)).current;
+  const slide = useRef(new Animated.Value(-700)).current;
   useEffect(() => {
     setExpanded(false);
     if (toast) {
-      slide.setValue(-240);
+      slide.setValue(-700);
       Animated.spring(slide, {
         toValue: 0,
         useNativeDriver: true,
@@ -4676,7 +4745,7 @@ function WorldUpdateToast() {
   }, [toast?.id, slide, toast]);
   const animateOut = (after: () => void) => {
     Animated.timing(slide, {
-      toValue: -240,
+      toValue: -700,
       duration: 180,
       useNativeDriver: true,
     }).start(({ finished }) => {
@@ -4809,10 +4878,14 @@ function WorldUpdateToast() {
               <View
                 key={`r${i}`}
                 style={{
+                  // Round 1.11.32 Alpha Fix #2 — keep a safe gutter on the
+                  // right of each 50%-wide chip so the Δ% number never bumps
+                  // into the NEXT chip's avatar in the 2-column grid.
                   width: "50%",
                   flexDirection: "row",
                   alignItems: "center",
                   gap: 6,
+                  paddingRight: 10,
                 }}
               >
                 <Avatar
@@ -4821,12 +4894,25 @@ function WorldUpdateToast() {
                   ring={positive ? colors.green : colors.amber}
                   ringWidth={2}
                 />
-                <AppText size={12} weight="800" numberOfLines={1} style={{ flex: 1 }}>
+                <AppText
+                  size={12}
+                  weight="800"
+                  numberOfLines={1}
+                  // flexShrink: 1 lets long names ellipsis instead of
+                  // pushing Δ% out of the chip; minWidth: 0 lets the
+                  // shrink actually take effect (RN default minWidth is
+                  // "auto" which leaks past parent).
+                  style={{ flexShrink: 1, minWidth: 0 }}
+                >
                   {c?.name?.split(" ")[0] ?? d.characterId}
                 </AppText>
                 <AppText
                   size={12}
                   weight="900"
+                  // marginLeft: "auto" pulls the Δ% to whatever space
+                  // remains, with the parent's paddingRight: 10 keeping
+                  // it off the neighboring chip.
+                  style={{ marginLeft: "auto" }}
                   color={positive ? colors.green : colors.amber}
                 >
                   {hasNumericDelta
@@ -4841,14 +4927,32 @@ function WorldUpdateToast() {
         </View>
       )}
 
-      {/* View all changes / Collapse toggle */}
-      <Pressable onPress={() => setExpanded((e) => !e)} hitSlop={6}>
-        <AppText size={12} color={colors.green} weight="800">
-          {expanded ? "← Collapse" : "View all changes →"}
-        </AppText>
-      </Pressable>
-
-      {expanded ? <ExpandedToastPanel toast={toast} /> : null}
+      {/* View all changes / Collapse toggle — Round 1.11.32 Alpha Fix #6.
+          Hidden entirely when the toast carries NO numeric changes (e.g.
+          the "Nothing new today" info toast). Expanding into an empty
+          panel was confusing UX — now those toasts stay purely
+          informational. The hasAnyStats check covers every field the
+          ExpandedToastPanel would actually render. */}
+      {(() => {
+        const hasAnyStats =
+          (toast.followerDelta ?? 0) > 0 ||
+          (toast.xpDelta ?? 0) > 0 ||
+          toast.humorDelta !== undefined ||
+          toast.auraDelta !== undefined ||
+          (toast.relationshipChanges?.length ?? 0) > 0 ||
+          relChips.length > 0;
+        if (!hasAnyStats) return null;
+        return (
+          <>
+            <Pressable onPress={() => setExpanded((e) => !e)} hitSlop={6}>
+              <AppText size={12} color={colors.green} weight="800">
+                {expanded ? "← Collapse" : "View all changes →"}
+              </AppText>
+            </Pressable>
+            {expanded ? <ExpandedToastPanel toast={toast} /> : null}
+          </>
+        );
+      })()}
     </>
   );
 
@@ -5490,6 +5594,255 @@ function EditCharacterModal() {
             <AppText size={11} color={colors.muted}>
               Photos picked from your library stay on your device. Want to revert to the default photo? Pick the image again from the gallery — or paste a fresh one.
             </AppText>
+          </View>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+// ===================================================================
+//  PR ACTIONS MODAL — Round 1.11.32 Faza D
+// ===================================================================
+// Three sections: PR Stunts (3 AI/offline options), Laying Low toggle,
+// Divert Attention (pick a cast member to throw under the bus). Opens
+// whenever `prActionsOpen === true` (CrisisBar tap).
+function PRActionsModal() {
+  const {
+    state,
+    prActionsOpen,
+    setPRActionsOpen,
+    fetchPRStuntOptions,
+    triggerPRStunt,
+    toggleLayingLow,
+    triggerDivertAttention,
+    cast,
+    resolveCharacter,
+  } = useGame();
+  const insets = useSafeAreaInsets();
+  const [stunts, setStunts] = useState<PRStuntOption[]>([]);
+  const [loadingStunts, setLoadingStunts] = useState(false);
+
+  // Fetch stunts on every open — keep the 3 options fresh & contextual to
+  // the CURRENT crisis state. The offline bank shuffles itself anyway.
+  useEffect(() => {
+    if (!prActionsOpen) return;
+    let cancelled = false;
+    setLoadingStunts(true);
+    setStunts([]);
+    fetchPRStuntOptions()
+      .then((opts) => {
+        if (!cancelled) setStunts(opts);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingStunts(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [prActionsOpen, fetchPRStuntOptions]);
+
+  // Divert cooldown — same target may not be diverted on twice in <3 days.
+  const divertCooldownTarget = (id: string): boolean => {
+    return state.prHistory.some(
+      (p) =>
+        p.action === "divert" &&
+        p.targetId === id &&
+        p.day > state.day - 3,
+    );
+  };
+
+  return (
+    <Modal
+      visible={prActionsOpen}
+      animationType="slide"
+      onRequestClose={() => setPRActionsOpen(false)}
+    >
+      <View style={{ flex: 1, backgroundColor: colors.bg, paddingTop: insets.top + 8 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 14 }}>
+          <IconButton onPress={() => setPRActionsOpen(false)}>
+            <X color={colors.text} size={20} />
+          </IconButton>
+          <AppText size={18} weight="900" style={{ marginLeft: 8, flex: 1 }}>
+            PR Actions
+          </AppText>
+          <View
+            style={{
+              paddingHorizontal: 10,
+              paddingVertical: 4,
+              borderRadius: 999,
+              backgroundColor: "#5a1212",
+            }}
+          >
+            <AppText size={12} weight="900" color="#ffd7d7">
+              Crisis {Math.round(state.crisisLevel)}/100
+            </AppText>
+          </View>
+        </View>
+        <ScrollView
+          contentContainerStyle={{ padding: 18, paddingBottom: 60, gap: 22 }}
+        >
+          {/* Origin context */}
+          <Card style={{ backgroundColor: "#2a1414", borderColor: "#7a1a1a" }}>
+            <AppText size={13} color="#f3a8a8" weight="800">
+              {state.crisisOrigin?.kind === "relationship-drop"
+                ? `Public beef with @${state.crisisOrigin.characterId}`
+                : state.crisisOrigin?.kind === "event-misstep"
+                  ? `Event misstep: ${state.crisisOrigin.eventTitle}`
+                  : "The internet just turned"}
+            </AppText>
+            {state.crisisStartedDay !== null ? (
+              <AppText size={11} color="#c98787">
+                Day {state.crisisStartedDay} → present (Day {state.day})
+              </AppText>
+            ) : null}
+          </Card>
+
+          {/* SECTION 1 — PR Stunts */}
+          <View style={{ gap: 10 }}>
+            <SectionTitle title="PR Stunts & Statements" />
+            <AppText size={12} color={colors.muted2}>
+              Burn stat points for an instant crisis drop. Higher effect costs more.
+            </AppText>
+            {loadingStunts ? (
+              <View style={{ paddingVertical: 24, alignItems: "center" }}>
+                <AppText size={13} color={colors.muted2}>
+                  Loading options…
+                </AppText>
+              </View>
+            ) : (
+              stunts.map((opt) => {
+                const cannotAfford =
+                  state.player.socialPresence.humor < opt.humorCost ||
+                  state.player.socialPresence.aura < opt.auraCost;
+                return (
+                  <Pressable
+                    key={opt.id}
+                    disabled={cannotAfford}
+                    onPress={() => triggerPRStunt(opt)}
+                    style={({ pressed }) => ({
+                      backgroundColor: cannotAfford ? colors.surfaceSoft : colors.surface,
+                      borderColor: cannotAfford ? colors.divider : colors.blue,
+                      borderWidth: 1,
+                      borderRadius: 14,
+                      padding: 14,
+                      gap: 6,
+                      opacity: pressed ? 0.85 : 1,
+                    })}
+                  >
+                    <AppText size={14} weight="900">
+                      {opt.title}
+                    </AppText>
+                    <AppText size={12} color={colors.muted2}>
+                      {opt.description}
+                    </AppText>
+                    <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>
+                      <AppText size={12} weight="800" color={colors.green}>
+                        -{opt.effect} crisis
+                      </AppText>
+                      {opt.humorCost > 0 ? (
+                        <AppText size={12} color={colors.amber}>
+                          -{opt.humorCost.toFixed(1)} humor
+                        </AppText>
+                      ) : null}
+                      {opt.auraCost > 0 ? (
+                        <AppText size={12} color={colors.amber}>
+                          -{opt.auraCost.toFixed(1)} aura
+                        </AppText>
+                      ) : null}
+                      {cannotAfford ? (
+                        <AppText size={11} color={colors.muted}>
+                          (insufficient stats)
+                        </AppText>
+                      ) : null}
+                    </View>
+                  </Pressable>
+                );
+              })
+            )}
+          </View>
+
+          {/* SECTION 2 — Lay Low */}
+          <View style={{ gap: 10 }}>
+            <SectionTitle title="Lay Low" />
+            <Pressable
+              onPress={toggleLayingLow}
+              style={({ pressed }) => ({
+                backgroundColor: state.crisisLayingLow ? "#2a3a2a" : colors.surface,
+                borderColor: state.crisisLayingLow ? colors.green : colors.border,
+                borderWidth: 1,
+                borderRadius: 14,
+                padding: 14,
+                gap: 6,
+                opacity: pressed ? 0.85 : 1,
+              })}
+            >
+              <AppText size={14} weight="900">
+                {state.crisisLayingLow ? "Stop laying low" : "Lay low for now"}
+              </AppText>
+              <AppText size={12} color={colors.muted2}>
+                {state.crisisLayingLow
+                  ? "Resume normal posting. Crisis decays slowly again."
+                  : "Crisis decays faster (-8/day) but follower gain is reduced by 70%."}
+              </AppText>
+            </Pressable>
+          </View>
+
+          {/* SECTION 3 — Divert Attention */}
+          <View style={{ gap: 10 }}>
+            <SectionTitle title="Divert Attention" />
+            <AppText size={12} color={colors.muted2}>
+              Costs 2 energy. Sacrifices another celeb's vibe to flip the cycle off you.
+              Same target can't be picked twice in 3 days.
+            </AppText>
+            {cast.length === 0 ? (
+              <Card>
+                <AppText size={13} color={colors.muted2}>
+                  No cast members yet — add a celebrity first.
+                </AppText>
+              </Card>
+            ) : (
+              cast.map((c) => {
+                const onCooldown = divertCooldownTarget(c.id);
+                const ch = resolveCharacter(c.id);
+                if (!ch) return null;
+                return (
+                  <Pressable
+                    key={c.id}
+                    disabled={onCooldown}
+                    onPress={() => triggerDivertAttention(c.id)}
+                    style={({ pressed }) => ({
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 12,
+                      padding: 12,
+                      borderRadius: 14,
+                      borderWidth: 1,
+                      borderColor: onCooldown ? colors.divider : colors.border,
+                      backgroundColor: onCooldown ? colors.surfaceSoft : colors.surface,
+                      opacity: pressed ? 0.85 : 1,
+                    })}
+                  >
+                    <Avatar uri={ch.avatar} size={42} />
+                    <View style={{ flex: 1 }}>
+                      <AppText size={14} weight="900">
+                        {ch.name}
+                      </AppText>
+                      <AppText size={12} color={colors.muted2}>
+                        {ch.handle}
+                      </AppText>
+                    </View>
+                    <AppText
+                      size={12}
+                      weight="800"
+                      color={onCooldown ? colors.muted : colors.amber}
+                    >
+                      {onCooldown ? "Cooldown" : "Throw under bus"}
+                    </AppText>
+                  </Pressable>
+                );
+              })
+            )}
           </View>
         </ScrollView>
       </View>

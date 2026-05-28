@@ -28,6 +28,8 @@ import {
   ChatMessage,
   ChemistryType,
   ContactState,
+  CrisisAction,
+  CrisisOrigin,
   FeedPost,
   GamePhase,
   GameState,
@@ -35,6 +37,7 @@ import {
   Milestone,
   NotificationItem,
   PlayerProfile,
+  PRStuntOption,
   Provider,
   ScoreChange,
   SideQuest,
@@ -50,6 +53,7 @@ import {
   generateComposeSuggestions,
   generateEvent,
   generatePostReplies,
+  generatePRStuntOptions,
   generateScenario,
   generateSinglePost,
   buildScenarioThreadReplies,
@@ -274,6 +278,12 @@ function createInitialState(): GameState {
     isFetchingBackgroundPost: false,
     currentEventContext: null,
     lastBackgroundFetchError: null,
+    // Round 1.11.32 Faza D — Stan Wars defaults.
+    crisisLevel: 0,
+    crisisOrigin: null,
+    crisisStartedDay: null,
+    crisisLayingLow: false,
+    prHistory: [],
   };
 }
 
@@ -339,6 +349,25 @@ type GameContextValue = {
   dismissToast: () => void;
   resolveCharacter: (id: string) => (Character & { isOutlet?: boolean }) | undefined;
   updateCharacterOverride: (id: string, patch: Partial<{ avatar: AvatarSource; banner: AvatarSource; name: string; handle: string; bio: string; description: string }>) => void;
+
+  // Round 1.11.32 Faza D — Stan Wars / Cancel Culture controls.
+  // Fetch 3 PR Stunt options for the current crisis (AI when online,
+  // offline bank when not). Calling `prActionsOpen` true after the
+  // fetch surfaces the modal with the freshly-loaded list.
+  fetchPRStuntOptions: () => Promise<PRStuntOption[]>;
+  // Apply a chosen PR Stunt — burns the stat cost, knocks the crisis
+  // level down by `effect`, logs into prHistory + activityLog.
+  triggerPRStunt: (option: PRStuntOption) => void;
+  // Toggle "laying low" mode. Flips the boolean and surfaces a toast
+  // explaining the consequence (faster decay, 70% follower throttle).
+  toggleLayingLow: () => void;
+  // Divert attention — costs 2 energy + sacrifices a chosen target's
+  // vibe (-20..-30) for a 30-50 crisis drop. Fires a priority Pop Craze
+  // post into the FRONT of the buffer so the player sees the leak first.
+  triggerDivertAttention: (targetCharacterId: string) => Promise<void>;
+  // Crisis modal open/close.
+  prActionsOpen: boolean;
+  setPRActionsOpen: (open: boolean) => void;
 
   // game logic
   triggerEvent: () => Promise<void>;
@@ -437,6 +466,9 @@ export function GameProvider({ children }: PropsWithChildren) {
   const [ready, setReady] = useState(false);
   const [pendingEvent, setPendingEvent] = useState<EventOutcome | null>(null);
   const [completingEvent, setCompletingEvent] = useState(false);
+  // Round 1.11.32 Faza D — PR Actions modal visibility lives in the
+  // provider so any screen can open it (CrisisBar tap, toast CTA, etc).
+  const [prActionsOpen, setPRActionsOpen] = useState(false);
   const stateRef = useRef(state);
   // Round 1.11.9 — synchronous fetch lock. React's `isGenerating` setState is
   // async and batched, so two rapid taps on a refresh / send button could
@@ -541,6 +573,13 @@ export function GameProvider({ children }: PropsWithChildren) {
         dailyAuthorPool: state.dailyAuthorPool,
         pendingBackgroundPosts: state.pendingBackgroundPosts,
         currentEventContext: state.currentEventContext,
+        // Round 1.11.32 Faza D — crisis state persisted (close/reopen
+        // mid-storm keeps the meter where you left it).
+        crisisLevel: state.crisisLevel,
+        crisisOrigin: state.crisisOrigin,
+        crisisStartedDay: state.crisisStartedDay,
+        crisisLayingLow: state.crisisLayingLow,
+        prHistory: state.prHistory,
       };
       const serialized = JSON.stringify(snapshot);
       if (serialized === lastSavedHashRef.current) return;
@@ -585,6 +624,11 @@ export function GameProvider({ children }: PropsWithChildren) {
     state.dailyAuthorPool,
     state.pendingBackgroundPosts,
     state.currentEventContext,
+    state.crisisLevel,
+    state.crisisOrigin,
+    state.crisisStartedDay,
+    state.crisisLayingLow,
+    state.prHistory,
   ]);
 
   // ===========================================================
@@ -664,6 +708,26 @@ export function GameProvider({ children }: PropsWithChildren) {
           character,
           contactChemistry,
           recentPlayerActions: cur.activityLog.slice(0, 3).map((l) => l.title),
+          // Round 1.11.32 Alpha Fix #4 — feed the full active cast into
+          // the prompt so AI can weave celeb cross-comments into the
+          // post's threadReplies. We use `contacts` keys (full cast)
+          // rather than `dailyAuthorPool.celebs` (today's drain queue)
+          // because cross-comments shouldn't be gated by who's already
+          // posted today — anyone in the cast can react.
+          castCelebIds: Object.keys(cur.contacts),
+          // Round 1.11.32 Faza D — crisis context for the bg fetcher
+          // matches the post-replies path. Gated > 20 server-side too.
+          crisisContext:
+            cur.crisisLevel > 20
+              ? {
+                  level: cur.crisisLevel,
+                  layingLow: cur.crisisLayingLow,
+                  originCharacterId:
+                    cur.crisisOrigin?.kind === "relationship-drop"
+                      ? cur.crisisOrigin.characterId
+                      : undefined,
+                }
+              : undefined,
         });
 
         // Synthesize FeedPost shape from AI result. Reuses the same
@@ -718,11 +782,42 @@ export function GameProvider({ children }: PropsWithChildren) {
           if (isFan) fanCandidates.push(authorId);
           for (const tr of threadReplies) fanCandidates.push(tr.authorId);
           const nextFanCache = mintFanIdentities(s2.fanIdentityCache, fanCandidates);
+
+          // Round 1.11.32 (Poprawka 2) — apply optional per-post
+          // relationshipShift to the matching contact. The AI may attach
+          // a tiny ±delta when the post is relevant to one cast member
+          // (e.g. Sabrina posting in support of the player's event
+          // choice). Without this block the shift would be parsed by
+          // generateSinglePost and then silently dropped on the floor.
+          // Pattern mirrors applyPostReplies: clamp vibe, refresh
+          // moodInfo, write vibeReason for the next refresh's UI.
+          let nextContacts = s2.contacts;
+          const shift = result.relationshipShift;
+          if (shift) {
+            const c = s2.contacts[shift.characterId];
+            if (c) {
+              const newVibe = Math.max(-100, Math.min(100, c.vibe + shift.delta));
+              const moodInfo = moodFor(newVibe);
+              nextContacts = {
+                ...s2.contacts,
+                [shift.characterId]: {
+                  ...c,
+                  vibe: newVibe,
+                  vibeDelta: shift.delta,
+                  vibeReason: shift.reason,
+                  currentFeeling: { headline: moodInfo.headline, detail: moodInfo.detail },
+                  mood: { label: moodInfo.label, reason: moodInfo.detail, delta: shift.delta },
+                },
+              };
+            }
+          }
+
           return {
             ...s2,
             dailyAuthorPool: nextPool,
             pendingBackgroundPosts: [...s2.pendingBackgroundPosts, newPost],
             fanIdentityCache: nextFanCache,
+            contacts: nextContacts,
             isFetchingBackgroundPost: false,
             lastBackgroundFetchError: null,
           };
@@ -871,6 +966,13 @@ export function GameProvider({ children }: PropsWithChildren) {
             // Day 1 has no event yet — pool fetches will all be off-topic.
             currentEventContext: null,
             lastBackgroundFetchError: null,
+            // Round 1.11.32 Faza D — fresh slate. Crisis state never
+            // carries across scenarios.
+            crisisLevel: 0,
+            crisisOrigin: null,
+            crisisStartedDay: null,
+            crisisLayingLow: false,
+            prHistory: [],
             activeTab: "feed",
             phase: "game",
           };
@@ -1047,6 +1149,20 @@ export function GameProvider({ children }: PropsWithChildren) {
               replyMode: !!contextReply,
               originalAuthor: author?.name,
               contextReplyText: contextReply?.text,
+              // Round 1.11.32 Faza D — crisis context lets the AI
+              // activate defensive fan voicing. Only attached when
+              // level > 20 (token-saving guard).
+              crisisContext:
+                stateRef.current.crisisLevel > 20
+                  ? {
+                      level: stateRef.current.crisisLevel,
+                      layingLow: stateRef.current.crisisLayingLow,
+                      originCharacterId:
+                        stateRef.current.crisisOrigin?.kind === "relationship-drop"
+                          ? stateRef.current.crisisOrigin.characterId
+                          : undefined,
+                    }
+                  : undefined,
             });
             if (result) setState((s) => applyPostReplies(s, post.id, result, contextReplyId));
           } finally {
@@ -1117,11 +1233,17 @@ export function GameProvider({ children }: PropsWithChildren) {
           return;
         }
         softHaptic();
+        // Round 1.11.32 Alpha Fix #5 — initial organic likes roll. The
+        // previous `likes: 0` left player replies looking dead even after
+        // multiple refreshes (the late-arriving bump from applyPostReplies
+        // moved by ~1-2 likes early-game). rollPlayerReplyLikes seeds
+        // 5-40 immediately on Day 1, scaling with followers + presence
+        // through late game.
         const reply: ThreadReply = {
           id: `r-${Date.now()}`,
           authorId: "player",
           text: trimmed,
-          likes: 0,
+          likes: rollPlayerReplyLikes(stateRef.current.player),
           createdAt: nowLabel(),
         };
         setState((s) => {
@@ -1168,7 +1290,9 @@ export function GameProvider({ children }: PropsWithChildren) {
           id: `r-${Date.now()}`,
           authorId: "player",
           text: trimmed,
-          likes: 0,
+          // Same initial roll — sub-replies under celeb threads also need
+          // organic engagement, not a flat zero.
+          likes: rollPlayerReplyLikes(stateRef.current.player),
           createdAt: nowLabel(),
           parentReplyId,
         };
@@ -1360,6 +1484,246 @@ export function GameProvider({ children }: PropsWithChildren) {
         }));
       },
 
+      // ----- Round 1.11.32 Faza D — Stan Wars actions
+      prActionsOpen,
+      setPRActionsOpen: (open) => setPRActionsOpen(open),
+
+      fetchPRStuntOptions: async () => {
+        return generatePRStuntOptions({
+          player: stateRef.current.player,
+          world: activeWorld,
+          crisisOrigin: stateRef.current.crisisOrigin,
+          crisisLevel: stateRef.current.crisisLevel,
+          recentActions: stateRef.current.activityLog
+            .slice(0, 3)
+            .map((l) => `${l.title} — ${l.body ?? ""}`),
+        });
+      },
+
+      triggerPRStunt: (option) => {
+        if (stateRef.current.crisisLevel <= 0) return;
+        softHaptic();
+        setState((s) => {
+          // Burn stat costs (clamped to 0 floor) and drop crisisLevel.
+          const newHumor = Math.max(0, s.player.socialPresence.humor - option.humorCost);
+          const newAura = Math.max(0, s.player.socialPresence.aura - option.auraCost);
+          const reduced = applyCrisisDelta(s, -option.effect);
+          return {
+            ...reduced,
+            player: {
+              ...reduced.player,
+              socialPresence: { humor: newHumor, aura: newAura },
+            },
+            // Cap prHistory at the last 20 entries — protects save size
+            // and matches the user-locked limit.
+            prHistory: [
+              ...reduced.prHistory,
+              {
+                day: s.day,
+                action: "pr-stunt" as CrisisAction,
+                effect: `${option.title} (-${option.effect} crisis)`,
+              },
+            ].slice(-20),
+            activityLog: [
+              logEntry({
+                kind: "milestone-completed",
+                title: `PR move: ${option.title}`,
+                body: option.description,
+                day: s.day,
+                scoreChanges: [
+                  { label: "Crisis", delta: -option.effect, positive: true },
+                  ...(option.humorCost > 0
+                    ? [{ label: "Humor", delta: -option.humorCost, positive: false }]
+                    : []),
+                  ...(option.auraCost > 0
+                    ? [{ label: "Aura", delta: -option.auraCost, positive: false }]
+                    : []),
+                ],
+              }),
+              ...reduced.activityLog,
+            ],
+            lastToast: {
+              id: `t-pr-${Date.now()}`,
+              headline: `PR move: ${option.title}`,
+              body: `Crisis ↓${option.effect}. The cycle moves on.`,
+              presenceDeltas: [],
+              relationshipDeltas: [],
+            },
+          };
+        });
+        setPRActionsOpen(false);
+      },
+
+      toggleLayingLow: () => {
+        if (stateRef.current.crisisLevel <= 0) return;
+        softHaptic();
+        setState((s) => ({
+          ...s,
+          crisisLayingLow: !s.crisisLayingLow,
+          prHistory: [
+            ...s.prHistory,
+            {
+              day: s.day,
+              action: "laying-low" as CrisisAction,
+              effect: !s.crisisLayingLow
+                ? "Toggled ON — decay -8/day, followers 0.3×"
+                : "Toggled OFF — normal posting resumed",
+            },
+          ].slice(-20),
+          lastToast: {
+            id: `t-lay-${Date.now()}`,
+            headline: !s.crisisLayingLow ? "Laying low" : "Back online",
+            body: !s.crisisLayingLow
+              ? "Crisis decays faster but followers trickle."
+              : "Normal posting resumed. Crisis still active.",
+            presenceDeltas: [],
+            relationshipDeltas: [],
+          },
+        }));
+      },
+
+      triggerDivertAttention: async (targetCharacterId) => {
+        if (stateRef.current.crisisLevel <= 0) return;
+        if (stateRef.current.isGenerating) return;
+        // Energy cost = 2 (heavier than a normal PR stunt — divert spends
+        // a relationship AND publishes a story).
+        const energyAfterFirst = consumeEnergy(stateRef.current);
+        if (!energyAfterFirst.ok) {
+          softHaptic();
+          setState((s) => ({ ...s, lastToast: outOfEnergyToast() }));
+          return;
+        }
+        const energyAfterSecond = consumeEnergy(energyAfterFirst.next);
+        if (!energyAfterSecond.ok) {
+          softHaptic();
+          setState((s) => ({ ...s, lastToast: outOfEnergyToast() }));
+          return;
+        }
+        softHaptic();
+        const targetContact = stateRef.current.contacts[targetCharacterId];
+        if (!targetContact) return;
+        const target = allCharacters.find((c) => c.id === targetCharacterId);
+        const targetName = target?.name ?? "your friend";
+
+        // Roll: -20..-30 vibe to target, -30..-50 crisis off the meter.
+        const vibeHit = -(20 + Math.floor(Math.random() * 11));
+        const crisisDrop = -(30 + Math.floor(Math.random() * 21));
+        const newVibe = Math.max(-100, Math.min(100, targetContact.vibe + vibeHit));
+        const moodInfo = moodFor(newVibe);
+        setState((s) => {
+          // Apply energy + vibe hit + crisis drop atomically.
+          const afterEnergy = { ...s, energy: energyAfterSecond.next.energy, bonusEnergy: energyAfterSecond.next.bonusEnergy };
+          const withDrop = applyCrisisDelta(afterEnergy, crisisDrop);
+          return {
+            ...withDrop,
+            contacts: {
+              ...withDrop.contacts,
+              [targetCharacterId]: {
+                ...targetContact,
+                vibe: newVibe,
+                vibeDelta: vibeHit,
+                vibeReason: `Your team leaked dirt to flip the cycle off you.`,
+                currentFeeling: { headline: moodInfo.headline, detail: moodInfo.detail },
+                mood: { label: moodInfo.label, reason: moodInfo.detail, delta: vibeHit },
+              },
+            },
+            prHistory: [
+              ...withDrop.prHistory,
+              {
+                day: s.day,
+                action: "divert" as CrisisAction,
+                targetId: targetCharacterId,
+                effect: `Diverted onto @${targetCharacterId} (-${Math.abs(crisisDrop)} crisis, ${vibeHit} vibe)`,
+              },
+            ].slice(-20),
+            activityLog: [
+              logEntry({
+                kind: "milestone-completed",
+                title: `Diverted attention onto ${targetName}`,
+                body: `Your PR team flipped the cycle off you.`,
+                day: s.day,
+                scoreChanges: [
+                  { label: "Crisis", delta: crisisDrop, positive: true },
+                  { label: `Vibe (${targetName})`, delta: vibeHit, positive: false },
+                ],
+              }),
+              ...withDrop.activityLog,
+            ],
+            lastToast: {
+              id: `t-divert-${Date.now()}`,
+              headline: `Heat redirected to ${targetName}`,
+              body: `Crisis ↓${Math.abs(crisisDrop)}. ${targetName}'s vibe took the hit.`,
+              presenceDeltas: [],
+              relationshipDeltas: [{ characterId: targetCharacterId, direction: "down" }],
+            },
+          };
+        });
+        setPRActionsOpen(false);
+
+        // Priority leak post: try AI Pop Craze, fall back gracefully if
+        // it fails — the crisis drop already landed via setState above,
+        // so a network hiccup just means no leak post (acceptable).
+        try {
+          const cur = stateRef.current;
+          const result = await generateSinglePost({
+            player: cur.player,
+            world: activeWorld,
+            characterId: "pop-craze",
+            isFan: false,
+            relateToEvent: false,
+            currentEventContext: `Pop Craze is leaking fresh dirt on @${targetCharacterId} (${targetName}) to flip the cycle off the player.`,
+            character: undefined,
+            recentPlayerActions: [],
+            castCelebIds: Object.keys(cur.contacts),
+          });
+          const baseId = Date.now();
+          const postAuthorSrc = findAnyCharacter("pop-craze");
+          const postAuthorFollowers =
+            postAuthorSrc && "followers" in postAuthorSrc && typeof postAuthorSrc.followers === "number"
+              ? postAuthorSrc.followers
+              : 0;
+          const threadReplies: ThreadReply[] = result.threadReplies.map((r, i) => {
+            const rSrc = findAnyCharacter(r.characterId);
+            const rFollowers =
+              rSrc && "followers" in rSrc && typeof rSrc.followers === "number"
+                ? rSrc.followers
+                : 0;
+            return {
+              id: `tr-${baseId}-${i}`,
+              authorId: r.characterId,
+              text: r.text,
+              likes: rollReplyLikes(r.characterId, rFollowers),
+              createdAt: nowLabel(),
+            };
+          });
+          const leakPost: FeedPost = {
+            id: `divert-${baseId}-${Math.random().toString(36).slice(2, 6)}`,
+            authorId: "pop-craze",
+            text: result.text,
+            replies: threadReplies.length,
+            reposts: `${(Math.random() * 80 + 20).toFixed(1)}K`,
+            likes: rollPostLikes("pop-craze", postAuthorFollowers),
+            threadReplies,
+            createdAt: nowLabel(),
+            day: cur.day,
+          };
+          setState((s2) => {
+            const candidates: string[] = [];
+            for (const tr of threadReplies) candidates.push(tr.authorId);
+            const fic = mintFanIdentities(s2.fanIdentityCache, candidates);
+            return {
+              ...s2,
+              // Inject at FRONT of buffer (priority): next pull surfaces
+              // the leak post before any earlier-buffered ambient post.
+              pendingBackgroundPosts: [leakPost, ...s2.pendingBackgroundPosts],
+              fanIdentityCache: fic,
+            };
+          });
+        } catch (err) {
+          console.warn("[divert] leak-post generation failed:", err);
+        }
+      },
+
       // ----- event flow
       triggerEvent: async () => {
         softHaptic();
@@ -1446,7 +1810,14 @@ export function GameProvider({ children }: PropsWithChildren) {
             // an event can yield ~500-1500 followers in a single beat —
             // matches "+415" in the original Status post-event screenshot.
             const eventLikeBoost = Math.floor(2000 + Math.random() * 3000);
-            const eventFollowerGain = rollFollowerGain(eventLikeBoost, next.player);
+            // Round 1.11.32 Faza D — apply crisisFollowerMult to event
+            // gain too. A major event during a 100/100 blackout still
+            // earns some followers (0.1× of 2000-3000 base ≈ 200-300)
+            // because the event itself is a big news moment, but the
+            // mult conveys "the world is half-ignoring you right now".
+            const eventFollowerGain = Math.floor(
+              rollFollowerGain(eventLikeBoost, next.player) * crisisFollowerMult(next),
+            );
 
             // Round 1.11.12 — apply per-character relationship shifts from the
             // event result. This mirrors what applyPostReplies does for
@@ -1559,6 +1930,21 @@ export function GameProvider({ children }: PropsWithChildren) {
                 })),
               },
             };
+            // Round 1.11.32 Faza D — natural crisis decay on day rollover.
+            // Laying low accelerates the meter's cooldown (-8/day) vs the
+            // normal passive drift (-3/day). applyCrisisDelta handles the
+            // 0-floor transition so the meter cleanly resets to "no crisis"
+            // (clearing origin + laying-low flag) when it lands at 0.
+            const decay = next.crisisLayingLow ? 8 : 3;
+            next = applyCrisisDelta(next, -decay);
+            // Crisis trigger from this event's relationship shifts too —
+            // an event-misstep that drops a contact below -50 still spikes
+            // the meter, even though completeEvent doesn't go through
+            // applyPostReplies' detectCrisisTrigger path.
+            const eventCrisisOrigin = detectCrisisTrigger(s.contacts, contactsAfterEvent);
+            if (eventCrisisOrigin) {
+              next = applyCrisisDelta(next, 25, eventCrisisOrigin);
+            }
             return withXP(next, xpReward);
           });
         } finally {
@@ -2113,6 +2499,103 @@ function rollPostLikes(authorId: string, followers: number): number {
 // gives 50-200 base. Late game (humor=80/aura=80) multiplies by 2.6× —
 // matches the "+415" follower bump from the original Status screenshot.
 // Floor of 50 means even an actionless refresh still moves the needle.
+// Round 1.11.32 Alpha Fix #5 — organic like growth for the player's own
+// replies under any post. Day 1 floor (5-40) keeps comments from sitting
+// at zero forever; follower contribution (0.05-0.15% of follower count)
+// scales late-game numbers; presence bonus adds extra reach for players
+// who've grown Humor/Aura. Late-game player with 500k followers + 40
+// humor/aura lands a comment at ~150-1300 likes immediately, then keeps
+// climbing on each refresh.
+function rollPlayerReplyLikes(player: PlayerProfile): number {
+  const base = 5 + Math.floor(Math.random() * 36);
+  const fromFollowers = Math.floor(
+    player.followers * (0.0005 + Math.random() * 0.001),
+  );
+  const presence = Math.floor(
+    (player.socialPresence.humor + player.socialPresence.aura) * 0.4,
+  );
+  return base + fromFollowers + presence;
+}
+
+// Per-refresh bump under the player's existing replies. Called from
+// applyPostReplies whenever a post-replies action processes — so each
+// pull-to-refresh that hits a post the player commented on visibly
+// adds engagement. Scales with followers + presence so growth keeps
+// pace with the player's celebrity-tier journey.
+function bumpPlayerReplyLikes(player: PlayerProfile): number {
+  const presenceBump = Math.floor(
+    Math.max(2, player.socialPresence.humor + player.socialPresence.aura) *
+      (0.4 + Math.random() * 0.6),
+  );
+  const followerBump = Math.floor(
+    player.followers * (0.0001 + Math.random() * 0.0004),
+  );
+  return presenceBump + followerBump;
+}
+
+// =============================================================
+// Round 1.11.32 Faza D — Crisis engine helpers (pure functions)
+// =============================================================
+
+// Inspect a contacts transition: did anyone JUST cross the -50 vibe
+// threshold (transitioning from ≥-50 to <-50)? Returns the matching
+// origin descriptor or null. Skips IDs the player doesn't actually
+// have in their cast — the AI hallucinating a feud with someone the
+// player never added shouldn't trigger a crisis.
+function detectCrisisTrigger(
+  prevContacts: GameState["contacts"],
+  nextContacts: GameState["contacts"],
+): CrisisOrigin | null {
+  for (const [id, c] of Object.entries(nextContacts)) {
+    const prev = prevContacts[id]?.vibe;
+    if (prev === undefined) continue; // contact wasn't in cast before — skip
+    if (c.vibe < -50 && prev >= -50) {
+      return { kind: "relationship-drop", characterId: id, vibe: c.vibe };
+    }
+  }
+  return null;
+}
+
+// Move crisisLevel by `delta` with edge-case handling for the 0 → >0
+// onset and >0 → 0 dismissal transitions. Onset stamps the day and
+// origin; dismissal clears everything including the laying-low flag.
+function applyCrisisDelta(
+  s: GameState,
+  delta: number,
+  origin?: CrisisOrigin,
+): GameState {
+  const newLevel = Math.max(0, Math.min(100, s.crisisLevel + delta));
+  if (s.crisisLevel === 0 && newLevel > 0) {
+    return {
+      ...s,
+      crisisLevel: newLevel,
+      crisisOrigin: origin ?? s.crisisOrigin,
+      crisisStartedDay: s.day,
+    };
+  }
+  if (newLevel === 0 && s.crisisLevel > 0) {
+    return {
+      ...s,
+      crisisLevel: 0,
+      crisisOrigin: null,
+      crisisStartedDay: null,
+      crisisLayingLow: false,
+    };
+  }
+  return { ...s, crisisLevel: newLevel };
+}
+
+// Aggregate follower-gain multiplier based on current crisis state.
+//   * crisisLevel === 100  → 0.1× (Absolute Blackout — posts ignored)
+//   * crisisLayingLow      → 0.3× (player is silent, growth muted)
+//   * otherwise            → 1.0× (normal)
+// Blackout takes precedence over laying-low so 100 is always 0.1.
+function crisisFollowerMult(s: GameState): number {
+  if (s.crisisLevel >= 100) return 0.1;
+  if (s.crisisLayingLow) return 0.3;
+  return 1;
+}
+
 function rollFollowerGain(likeBoost: number, player: PlayerProfile): number {
   const presenceBonus =
     1 + (player.socialPresence.humor + player.socialPresence.aura) / 100;
@@ -2147,18 +2630,20 @@ function mintFanIdentities(
     }
     const pick = anonymousFans[Math.abs(h) % anonymousFans.length];
     if (!next) next = { ...cache };
-    // Derive a friendly display name from the handle: strip leading "@",
-    // turn separators into spaces, title-case the words. "@kanye_truther_4"
-    // → "Kanye Truther 4".
-    const cleanHandle = id.replace(/^@+/, "");
-    const display = cleanHandle
-      .replace(/[_\-.]+/g, " ")
-      .trim()
-      .replace(/\b\w/g, (m) => m.toUpperCase()) || cleanHandle;
+    // Round 1.11.32 Alpha Fix #1 — pretty display.
+    // The technical ID stays unique for cache identity (e.g. "fan-12-mppgh6md-xzwl"
+    // — distinct from a sibling ad-hoc fan), but the RENDERED name and handle
+    // are pulled verbatim from the chosen anonymousFans pool entry. A small
+    // 2-digit suffix on the handle disambiguates between multiple ad-hoc IDs
+    // that happen to hash to the same pool slot — so the feed shows
+    // "@alex_vibe47" and "@alex_vibe82" rather than two identical-looking
+    // accounts. Suffix is deterministic (derived from the hash), so the same
+    // ad-hoc ID always renders with the same handle across sessions.
+    const suffix = (Math.abs(h) % 99).toString().padStart(2, "0");
     next[id] = {
       avatar: pick.avatar,
-      name: display,
-      handle: `@${cleanHandle}`,
+      name: pick.name,
+      handle: `${pick.handle}${suffix}`,
     };
   }
   return next ?? cache;
@@ -2412,19 +2897,29 @@ function applyPostReplies(
     };
   }
   const baseTime = Date.now();
+  // Round 1.11.32 Faza D — Emergent Defense likes multiplier. When the
+  // player is in crisis (level > 40), fan replies get +2.5× likes —
+  // simulates the "viral defense" UX where the supportive crowd's
+  // comments rocket up the engagement column and visibly outweigh the
+  // hate. Applied to FAN-tier authors only (anonymousFanIds + ad-hoc
+  // fan IDs that minted into the cache); celebs already get massive
+  // base likes via rollReplyLikes follower scaling.
+  const defenseMult = s.crisisLevel > 40 ? 2.5 : 1;
   const newReplies: ThreadReply[] = (result.replies ?? []).map((r, i) => {
     const rSrc = findAnyCharacter(r.characterId);
     const rFollowers =
       rSrc && "followers" in rSrc && typeof rSrc.followers === "number"
         ? rSrc.followers
         : 0;
+    const baseLikes = rollReplyLikes(r.characterId, rFollowers);
+    const isFanAuthor =
+      anonymousFanIds.includes(r.characterId) || !!s.fanIdentityCache[r.characterId];
+    const likes = isFanAuthor ? Math.floor(baseLikes * defenseMult) : baseLikes;
     return {
       id: `tr-${baseTime}-${i}`,
       authorId: r.characterId,
       text: r.text,
-      // Tiered + follower-scaled. Fans: 0-150 (rare 150-700 viral). Celebs:
-      // 0.005-0.05% of their followers. See rollReplyLikes.
-      likes: rollReplyLikes(r.characterId, rFollowers),
+      likes,
       createdAt: nowLabel(),
       parentReplyId,
     };
@@ -2435,10 +2930,11 @@ function applyPostReplies(
   // refresh from feeling completely dead. Without this, player's own replies
   // sit at 0 likes forever — applyPostReplies used to pass them through
   // untouched via `...p.threadReplies`.
-  const playerEngagement = Math.max(
-    5,
-    s.player.socialPresence.humor + s.player.socialPresence.aura,
-  );
+  // Round 1.11.32 Alpha Fix #5 — bumpPlayerReplyLikes replaces the older
+  // playerEngagement formula. The old version capped early-game growth at
+  // 0-2 likes/refresh because it depended only on humor+aura (which Day 1
+  // sit at 0/0). The new helper folds in followers + presence so player
+  // replies visibly grow on every refresh, even from a 0-follower start.
   const posts = s.posts.map((p) => {
     if (p.id !== postId) return p;
     const newReposts =
@@ -2448,9 +2944,7 @@ function applyPostReplies(
       tr.authorId === "player"
         ? {
             ...tr,
-            likes:
-              tr.likes +
-              Math.floor(playerEngagement * (0.1 + Math.random() * 0.4)),
+            likes: tr.likes + bumpPlayerReplyLikes(s.player),
           }
         : tr,
     );
@@ -2536,9 +3030,12 @@ function applyPostReplies(
   // gives the player some followers — scaled by likeBoost from the AI/fallback
   // and modulated by their Humor+Aura presence. Minimum 50 per refresh so the
   // counter always visibly moves.
-  const followerGain = rollFollowerGain(
-    result.metrics?.likeBoost ?? 0,
-    s.player,
+  // Round 1.11.32 Faza D — crisisFollowerMult throttles growth when the
+  // player is laying low (0.3×) or in absolute blackout (0.1×). Applied
+  // BEFORE the floor so a 50-follower base under blackout becomes 5,
+  // matching the "you're invisible right now" UX.
+  const followerGain = Math.floor(
+    rollFollowerGain(result.metrics?.likeBoost ?? 0, s.player) * crisisFollowerMult(s),
   );
   // Sync Social Media Presence + followers bump.
   const player = result.playerStatChanges
@@ -2582,13 +3079,25 @@ function applyPostReplies(
     s.fanIdentityCache,
     newReplies.map((r) => r.authorId),
   );
-  return {
+  // Round 1.11.32 Faza D — crisis detection on relationship-drop. If any
+  // contact JUST crossed below -50, transition state into crisis (or
+  // amplify if already in crisis). +25 base bump scales the meter
+  // visibly off a single feud spike. We pass the new contacts (post-shift)
+  // so detectCrisisTrigger sees the crossing.
+  let crisisBumped: GameState = {
     ...s,
     player,
     contacts,
     posts,
     notifications: notification ? [notification, ...s.notifications] : s.notifications,
     fanIdentityCache,
+  };
+  const crisisOrigin = detectCrisisTrigger(s.contacts, contacts);
+  if (crisisOrigin) {
+    crisisBumped = applyCrisisDelta(crisisBumped, 25, crisisOrigin);
+  }
+  return {
+    ...crisisBumped,
     lastToast: {
       id: `t-${baseTime}`,
       headline: replyHeadline,
