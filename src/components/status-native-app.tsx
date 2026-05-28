@@ -50,7 +50,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { useGame } from "@/context/game-context";
+import { evaluateQuestCondition, useGame } from "@/context/game-context";
 import {
   allCharacters as catalogAll,
   outletCharacters,
@@ -734,7 +734,19 @@ function GameShell() {
 
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
-      {state.activeTab === "feed" ? <FeedScreen /> : null}
+      {/* Round 1.11.32 G-Fix #7 — Feed stays MOUNTED across tab switches,
+          just hidden via display:none. The ~30-post scrollable feed was
+          the worst tab-swap hiccup because every entry had to be
+          re-resolved (resolveCharacter), re-rolled, and re-rendered on
+          return. Keeping it mounted trades a small memory footprint for
+          instant tab restoration. Other tabs (Goals/Messages/Alerts/
+          Profile) are still conditional-mount because they're smaller
+          screens and the cost is negligible. */}
+      <View
+        style={{ flex: 1, display: state.activeTab === "feed" ? "flex" : "none" }}
+      >
+        <FeedScreen />
+      </View>
       {state.activeTab === "goals" ? <GoalsScreen /> : null}
       {state.activeTab === "messages" ? <MessagesScreen /> : null}
       {state.activeTab === "alerts" ? <AlertsScreen /> : null}
@@ -1095,7 +1107,13 @@ function FeedScreen() {
   );
 }
 
-function FeedPostItem({
+// Round 1.11.32 G-Fix #7 — React.memo with shallow equality. Since
+// applyPostReplies + applyWorldUpdate mutate ONLY the touched posts
+// (immutable spread keeps unchanged post object references stable), this
+// memo lets unmodified posts skip the re-render path entirely when the
+// FeedScreen re-renders from a state mutation elsewhere. Cuts the
+// per-frame reconciliation work proportional to feed length.
+const FeedPostItem = React.memo(function FeedPostItem({
   post,
   showDivider,
   noTap,
@@ -1105,6 +1123,19 @@ function FeedPostItem({
   noTap?: boolean;
 }) {
   const { state, likePost, starPost, repostPost, openCharacterProfile, openPost, resolveCharacter } = useGame();
+  // Round 1.11.32 G-Fix #8 — pop scale animation on like/repost taps.
+  // Twitter/X-style "thump" that gives the action visible weight. The
+  // animation sequence runs in parallel with the state mutation so the
+  // colored fill flips in lockstep with the pop. Native driver = 60fps
+  // even on the JS-thread-stressed buffer-drain frames.
+  const heartScale = useRef(new Animated.Value(1)).current;
+  const zapScale = useRef(new Animated.Value(1)).current;
+  const popIcon = (val: Animated.Value) => {
+    Animated.sequence([
+      Animated.timing(val, { toValue: 1.4, duration: 110, useNativeDriver: true }),
+      Animated.spring(val, { toValue: 1, useNativeDriver: true, damping: 8, stiffness: 200 }),
+    ]).start();
+  };
   const author =
     post.authorId === "player"
       ? {
@@ -1175,15 +1206,18 @@ function FeedPostItem({
             <Pressable
               onPress={(e) => {
                 e.stopPropagation?.();
+                popIcon(zapScale);
                 repostPost(post.id);
               }}
               style={{ flexDirection: "row", alignItems: "center", gap: 5 }}
             >
-              <Zap
-                color={post.reposted ? colors.green : colors.muted}
-                fill={post.reposted ? colors.green : "transparent"}
-                size={16}
-              />
+              <Animated.View style={{ transform: [{ scale: zapScale }] }}>
+                <Zap
+                  color={post.reposted ? colors.green : colors.muted}
+                  fill={post.reposted ? colors.green : "transparent"}
+                  size={16}
+                />
+              </Animated.View>
               <AppText color={post.reposted ? colors.green : colors.muted} size={13}>
                 {post.reposts}
               </AppText>
@@ -1191,15 +1225,18 @@ function FeedPostItem({
             <Pressable
               onPress={(e) => {
                 e.stopPropagation?.();
+                popIcon(heartScale);
                 likePost(post.id);
               }}
               style={{ flexDirection: "row", alignItems: "center", gap: 6 }}
             >
-              <Heart
-                color={post.liked ? colors.pink : colors.muted}
-                fill={post.liked ? colors.pink : "transparent"}
-                size={16}
-              />
+              <Animated.View style={{ transform: [{ scale: heartScale }] }}>
+                <Heart
+                  color={post.liked ? colors.pink : colors.muted}
+                  fill={post.liked ? colors.pink : "transparent"}
+                  size={16}
+                />
+              </Animated.View>
               <AppText color={post.liked ? colors.pink : colors.muted} size={13}>
                 {formatCount(post.likes)}
               </AppText>
@@ -1238,7 +1275,7 @@ function FeedPostItem({
       {noTap ? body : <Pressable onPress={() => openPost(post.id)}>{body}</Pressable>}
     </View>
   );
-}
+});
 
 function Action({ icon, label }: { icon: React.ReactNode; label: string }) {
   return (
@@ -1895,17 +1932,27 @@ function GoalsScreen() {
         <Card style={{ gap: 0 }}>
           {state.sideQuests.map((quest, index) => {
             const done = !!quest.completed;
+            // Round 1.11.32 G-Fix #5 — evaluate the quest's condition
+            // against current state. `satisfied` flips the tap target
+            // active; `progress` surfaces the running counter so the
+            // player knows what they need to do.
+            const { satisfied, progress } = evaluateQuestCondition(
+              quest.condition,
+              state,
+            );
+            const claimable = satisfied && !done;
             return (
               <Pressable
                 key={quest.id}
                 onPress={() => completeSideQuest(quest.id)}
+                disabled={!claimable}
                 style={({ pressed }) => ({
                   paddingVertical: 14,
                   borderTopColor: colors.divider,
                   borderTopWidth: index === 0 ? 0 : 1,
                   flexDirection: "row",
                   gap: 12,
-                  opacity: pressed ? 0.78 : 1,
+                  opacity: pressed && claimable ? 0.78 : 1,
                   alignItems: "center",
                 })}
               >
@@ -1914,7 +1961,11 @@ function GoalsScreen() {
                     width: 22,
                     height: 22,
                     borderRadius: 11,
-                    borderColor: done ? colors.blue : colors.border,
+                    borderColor: done
+                      ? colors.blue
+                      : claimable
+                        ? colors.green
+                        : colors.border,
                     borderWidth: 2,
                     backgroundColor: done ? colors.blue : "transparent",
                     alignItems: "center",
@@ -1927,11 +1978,24 @@ function GoalsScreen() {
                   <AppText size={14} color={done ? colors.muted : colors.text}>
                     {quest.text}
                   </AppText>
-                  <AppText size={12} color={colors.amber}>
-                    +{quest.xp} xp ✨
-                  </AppText>
+                  <View style={{ flexDirection: "row", gap: 10, alignItems: "center" }}>
+                    <AppText size={12} color={colors.amber}>
+                      +{quest.xp} xp ✨
+                    </AppText>
+                    {progress && !done ? (
+                      <AppText
+                        size={12}
+                        color={claimable ? colors.green : colors.muted2}
+                      >
+                        · {progress}{claimable ? " — tap to claim" : ""}
+                      </AppText>
+                    ) : null}
+                  </View>
                 </View>
-                <Star color={colors.muted} size={16} />
+                <Star
+                  color={claimable ? colors.amber : colors.muted}
+                  size={16}
+                />
               </Pressable>
             );
           })}
@@ -2358,6 +2422,10 @@ function ChatRoom({ characterId, onBack }: { characterId: string; onBack: () => 
 
       <KeyboardAvoidingView
         behavior="padding"
+        // Round 1.11.32 G-Fix #1 — Chat composer mirrors post detail
+        // (same insets.bottom + 30 offset) so keyboard never covers the
+        // send button.
+        keyboardVerticalOffset={insets.bottom + 30}
         style={{
           position: "absolute",
           left: 0,
@@ -2654,6 +2722,7 @@ function ProfileScreen() {
     setCreateActivityOpen,
     openCharacterProfile,
     resolveCharacter,
+    setActiveTab,
   } = useGame();
   const insets = useSafeAreaInsets();
 
@@ -2716,6 +2785,45 @@ function ProfileScreen() {
             Followers
           </AppText>
         </AppText>
+
+        {/* Round 1.11.32 G-Fix #6 — Milestones counter on Profile. The
+            full milestones grid stays in the Goals tab; this strip just
+            broadcasts how many the player has cleared so the system
+            stays visible from anywhere. Tap the strip to jump straight
+            to the Goals tab and see the rail. */}
+        {(() => {
+          const total = state.milestones.length;
+          const cleared = state.milestones.filter((m) => m.completed).length;
+          const skipped = state.milestones.filter((m) => m.skipped).length;
+          return (
+            <Pressable
+              onPress={() => setActiveTab("goals")}
+              style={{
+                marginTop: 12,
+                paddingHorizontal: 14,
+                paddingVertical: 12,
+                borderRadius: radii.md,
+                backgroundColor: colors.surface,
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 10,
+              }}
+            >
+              <Trophy color={colors.amber} size={18} />
+              <View style={{ flex: 1 }}>
+                <AppText size={13} weight="900">
+                  Milestones {cleared} / {total}
+                </AppText>
+                <AppText size={11} color={colors.muted2}>
+                  {skipped > 0 ? `${skipped} skipped · ` : ""}Tap to open the rail
+                </AppText>
+              </View>
+              <AppText size={14} color={colors.muted2}>
+                →
+              </AppText>
+            </Pressable>
+          );
+        })()}
 
         <View style={{ gap: 10, marginTop: 14 }}>
           <Pressable
@@ -4623,13 +4731,14 @@ function PostDetailModal() {
 
         <KeyboardAvoidingView
           behavior="padding"
-          // Round 1.11.32 Faza F Fix #2 — bumped paddingBottom from
-          // `insets.bottom + 24` to `insets.bottom + 40`. Manual testing
-          // showed the "Post" button + "+ add a boost" pill still
-          // clipping on Pro-Max notch devices under the home-indicator
-          // gesture lane; 40px clears every iPhone gesture profile we
-          // tested. Visually generous bottom margin but matches social-
-          // media app conventions (Twitter/X uses ~36-44 here).
+          // Round 1.11.32 G-Fix #1 — keyboardVerticalOffset added so the
+          // composer floats clear of the keyboard with a visible margin
+          // instead of pancake-flush against it. `insets.bottom + 30`
+          // covers the home-indicator lane + a comfortable readable gap
+          // above the keyboard top edge. paddingBottom bumped 40 → 60 so
+          // the Post button + Add a boost pill always sit above the
+          // home-indicator lane on every iPhone gesture profile.
+          keyboardVerticalOffset={insets.bottom + 30}
           style={{
             position: "absolute",
             left: 0,
@@ -4637,7 +4746,7 @@ function PostDetailModal() {
             bottom: 0,
             paddingHorizontal: 14,
             paddingTop: 14,
-            paddingBottom: insets.bottom + 40,
+            paddingBottom: insets.bottom + 60,
             backgroundColor: colors.surfaceDeep,
             borderTopColor: colors.divider,
             borderTopWidth: 1,
@@ -4739,6 +4848,22 @@ function WorldUpdateToast() {
   // new toast appears; dismiss runs the spring in reverse before clearing
   // state.
   const slide = useRef(new Animated.Value(-700)).current;
+  // Round 1.11.32 G-Fix #2 — explicit Animated.Value drives the expanded
+  // panel's height + opacity together (0 → 1 on expand, 1 → 0 on
+  // collapse). We DO NOT toggle render of the panel anymore — it's
+  // always mounted inside an Animated.View with overflow: hidden, and
+  // the height interp grows/shrinks it. That kills the previous jank
+  // where flipping `expanded ? <Panel /> : null` made the layout pop.
+  // useNativeDriver: false because height isn't native-driverable; the
+  // animation is short enough (220ms) that JS thread cost is invisible.
+  const expandValue = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(expandValue, {
+      toValue: expanded ? 1 : 0,
+      duration: 220,
+      useNativeDriver: false,
+    }).start();
+  }, [expanded, expandValue]);
   // Round 1.11.32 Faza F Fix #3 — animateOut chains animation → state
   // clear. ANY programmatic dismiss (close button, auto-timer, etc.)
   // routes through this helper so the toast finishes its exit slide
@@ -4979,7 +5104,25 @@ function WorldUpdateToast() {
                 {expanded ? "← Collapse" : "View all changes →"}
               </AppText>
             </Pressable>
-            {expanded ? <ExpandedToastPanel toast={toast} /> : null}
+            {/* Round 1.11.32 G-Fix #2 — expanded panel always mounted
+                inside an animated height+opacity wrapper. overflow:
+                hidden clips during collapse so the parent card shrinks
+                cleanly instead of layout-thrashing. maxHeight cap of
+                560 fits the score-changes grid + 3 relationship cards
+                comfortably on every device; larger lists scroll inside
+                the existing inner ScrollView already. */}
+            <Animated.View
+              style={{
+                overflow: "hidden",
+                opacity: expandValue,
+                maxHeight: expandValue.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0, 560],
+                }),
+              }}
+            >
+              <ExpandedToastPanel toast={toast} />
+            </Animated.View>
           </>
         );
       })()}
@@ -5896,13 +6039,39 @@ export default function StatusNativeApp() {
   return (
     <View style={{ flex: 1, backgroundColor: colors.bgDeep, alignItems: "center" }}>
       <View style={{ flex: 1, width: "100%", maxWidth: appMaxWidth, backgroundColor: colors.bg }}>
-        {state.phase === "landing" ? <LandingScreen /> : null}
-        {state.phase === "hub" ? <HubScreen /> : null}
-        {state.phase === "details" ? <ScenarioDetailsScreen /> : null}
-        {state.phase === "setup" ? <CharacterSetupScreen /> : null}
-        {state.phase === "scenarioBuilder" ? <ScenarioBuilderScreen /> : null}
-        {state.phase === "game" ? <GameShell /> : null}
+        {/* Round 1.11.32 G-Fix #9 — subtle fade on phase transitions.
+            PhaseFade re-keys whenever state.phase flips, so the new
+            screen mounts with opacity 0 and fades to 1 over 220ms. The
+            outgoing screen unmounts the moment React swaps roots, so
+            there's no cross-fade — but the receiving screen's gentle
+            reveal kills the "BAM, new screen!" pop. */}
+        <PhaseFade key={state.phase}>
+          {state.phase === "landing" ? <LandingScreen /> : null}
+          {state.phase === "hub" ? <HubScreen /> : null}
+          {state.phase === "details" ? <ScenarioDetailsScreen /> : null}
+          {state.phase === "setup" ? <CharacterSetupScreen /> : null}
+          {state.phase === "scenarioBuilder" ? <ScenarioBuilderScreen /> : null}
+          {state.phase === "game" ? <GameShell /> : null}
+        </PhaseFade>
       </View>
     </View>
+  );
+}
+
+// Round 1.11.32 G-Fix #9 — fade-in wrapper. Mounted at the START of a
+// new phase render with opacity 0, then animated to 1 over 220ms. Keyed
+// by the parent so changing phase forces a remount + replay of the
+// animation. Native driver = JS thread stays clean during the fade.
+function PhaseFade({ children }: { children: React.ReactNode }) {
+  const fade = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(fade, {
+      toValue: 1,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+  }, [fade]);
+  return (
+    <Animated.View style={{ flex: 1, opacity: fade }}>{children}</Animated.View>
   );
 }

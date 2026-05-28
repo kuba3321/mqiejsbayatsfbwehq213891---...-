@@ -41,6 +41,7 @@ import {
   Provider,
   ScoreChange,
   SideQuest,
+  SideQuestCondition,
   SkillKey,
   ThreadReply,
   World,
@@ -219,10 +220,30 @@ function initialMilestones(): Milestone[] {
   }));
 }
 
+// Round 1.11.32 G-Fix #5 — quests now have machine-verifiable conditions.
+// Old subjective entries ("suggest a Grammy winner is a puppet") let
+// the player tap-claim XP without doing anything in-game. Each launch
+// quest pairs flavor text with a concrete state predicate so the
+// completion button gates behind real progress.
 const initialSideQuests: SideQuest[] = [
-  { id: "grammy-puppet", text: "Suggest a certain Grammy winner is just a puppet for their label.", xp: 29 },
-  { id: "romance-authenticity", text: "Question the authenticity of a trending celebrity romance.", xp: 54 },
-  { id: "stolen-track", text: "Imply a major artist's latest track was actually stolen.", xp: 51 },
+  {
+    id: "publish-3-posts",
+    text: "Find your voice — publish 3 posts to the feed.",
+    xp: 30,
+    condition: { kind: "publish-posts", count: 3 },
+  },
+  {
+    id: "first-event",
+    text: "Stir the pot — trigger your first event of the day.",
+    xp: 40,
+    condition: { kind: "trigger-events", count: 1 },
+  },
+  {
+    id: "warm-contact",
+    text: "Win someone over — push any contact's vibe past +20.",
+    xp: 50,
+    condition: { kind: "max-vibe", threshold: 20 },
+  },
 ];
 
 function createInitialState(): GameState {
@@ -282,10 +303,57 @@ function createInitialState(): GameState {
     // fetcher useEffect fills them during idle time.
     pendingNextEvent: null,
     pendingPostSuggestions: null,
+    // Round 1.11.32 G-Fix #3 — start with empty exhaustion queue so
+    // Day 1 fan-slot picks have full 30-pool variety.
+    recentCommenters: [],
     // Round 1.11.32 Faza E — crisis defaults via resetCrisisState helper.
     // Same shape consumed by initializeCharacter on scenario rollover.
     ...resetCrisisState(),
   };
+}
+
+// Round 1.11.32 G-Fix #5 — evaluate a side-quest condition against the
+// current state. Returns whether the player has earned the right to
+// claim XP AND a human-readable progress string for the GoalsScreen UI
+// ("2 / 3 posts"). Pure function — game-context's reducer calls it
+// during completeSideQuest, the UI calls it every render.
+export function evaluateQuestCondition(
+  condition: SideQuestCondition | undefined,
+  state: GameState,
+): { satisfied: boolean; progress: string } {
+  if (!condition) return { satisfied: true, progress: "" };
+  switch (condition.kind) {
+    case "publish-posts": {
+      const playerPosts = state.posts.filter((p) => p.authorId === "player").length;
+      return {
+        satisfied: playerPosts >= condition.count,
+        progress: `${Math.min(playerPosts, condition.count)} / ${condition.count} posts`,
+      };
+    }
+    case "trigger-events": {
+      const events = state.activityLog.filter((l) => l.kind === "event-created").length;
+      return {
+        satisfied: events >= condition.count,
+        progress: `${Math.min(events, condition.count)} / ${condition.count} events`,
+      };
+    }
+    case "max-vibe": {
+      const best = Object.values(state.contacts).reduce(
+        (acc, c) => Math.max(acc, c.vibe),
+        -100,
+      );
+      return {
+        satisfied: best >= condition.threshold,
+        progress: `Best vibe ${Math.round(best)} / +${condition.threshold}`,
+      };
+    }
+    case "follower-count": {
+      return {
+        satisfied: state.player.followers >= condition.threshold,
+        progress: `${state.player.followers} / ${condition.threshold} followers`,
+      };
+    }
+  }
 }
 
 function eventXpRange(level: number) {
@@ -866,6 +934,21 @@ export function GameProvider({ children }: PropsWithChildren) {
           day: cur.day,
         };
 
+        // Round 1.11.32 G-Fix #3 — rewrite any thread reply authors who
+        // are in the exhaustion queue to fresh fan IDs. Celebs (cast
+        // members) pass through unchanged; only known fan IDs are
+        // candidates for the swap. Indices are deterministic per beat
+        // so a single batch can't all collapse onto the same "fresh"
+        // pick.
+        for (let i = 0; i < threadReplies.length; i++) {
+          const tr = threadReplies[i];
+          const isFanReply = anonymousFanIds.includes(tr.authorId);
+          if (isFanReply && cur.recentCommenters.includes(tr.authorId)) {
+            const replacement = pickFreshFan(cur.recentCommenters, i);
+            threadReplies[i] = { ...tr, authorId: replacement };
+          }
+        }
+
         setState((s2) => {
           // Consume the slot we used. Celeb removal targets the EXACT id;
           // fan removal decrements the slot counter. Atomic with the
@@ -876,6 +959,13 @@ export function GameProvider({ children }: PropsWithChildren) {
                 ...s2.dailyAuthorPool,
                 celebs: s2.dailyAuthorPool.celebs.filter((id) => id !== authorId),
               };
+          // Round 1.11.32 G-Fix #3 — push this beat's fan authors into
+          // the exhaustion queue so the next beat picks DIFFERENT fans.
+          const usedFanIds = [
+            ...(isFan ? [] : []), // post author handled separately below
+            ...threadReplies.map((tr) => tr.authorId),
+          ];
+          const nextExhausted = pushExhausted(s2.recentCommenters, usedFanIds);
           // Collect every fresh fan-ID surfaced by this post (author +
           // thread reply authors). mintFanIdentities pure-merges them
           // into the cache so resolveCharacter renders stable avatars.
@@ -919,6 +1009,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             pendingBackgroundPosts: [...s2.pendingBackgroundPosts, newPost],
             fanIdentityCache: nextFanCache,
             contacts: nextContacts,
+            recentCommenters: nextExhausted,
             isFetchingBackgroundPost: false,
             lastBackgroundFetchError: null,
           };
@@ -1078,6 +1169,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             // be jarring.
             pendingNextEvent: null,
             pendingPostSuggestions: null,
+            recentCommenters: [],
             // Round 1.11.32 Faza E — fresh slate via DRY helper. Crisis
             // state never carries across scenarios; resetCrisisState() is
             // the single source of truth for the wipe shape.
@@ -2130,6 +2222,14 @@ export function GameProvider({ children }: PropsWithChildren) {
         setState((s) => {
           const quest = s.sideQuests.find((q) => q.id === id);
           if (!quest || quest.completed) return s;
+          // Round 1.11.32 G-Fix #5 — gate completion behind the quest's
+          // condition. Previously the player could tap any quest's
+          // checkmark and pocket XP without progress; now the reducer
+          // refuses to mutate when the condition is unsatisfied. The UI
+          // also disables the button (mirror evaluation in GoalsScreen)
+          // — this server-side guard is the defense in depth.
+          const { satisfied } = evaluateQuestCondition(quest.condition, s);
+          if (!satisfied) return s;
           const updated = s.sideQuests.map((q) =>
             q.id === id ? { ...q, completed: true } : q,
           );
@@ -2933,6 +3033,37 @@ function mintAdHocFanId(day: number): string {
   return `fan-${day}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
+// Round 1.11.32 G-Fix #3 — pick a fan ID that's NOT in the exhaustion
+// queue. Falls back to a random pool member if every fan is somehow
+// exhausted (e.g. queue size hit pool size after a stress test). Salt
+// is used to keep multiple replies inside the same beat from all
+// landing on the same "fresh" pick.
+function pickFreshFan(exhausted: string[], salt: number): string {
+  const fresh = anonymousFanIds.filter((id) => !exhausted.includes(id));
+  if (fresh.length === 0) {
+    return anonymousFanIds[(salt + Math.floor(Math.random() * anonymousFanIds.length)) % anonymousFanIds.length];
+  }
+  return fresh[(salt + Math.floor(Math.random() * fresh.length)) % fresh.length];
+}
+
+// Round 1.11.32 G-Fix #3 — push fan author IDs into the exhaustion
+// queue, dedupe, and clip to 10 entries. Celeb IDs pass through
+// unchanged: they have their own follower-scaled posting cadence and
+// the user only complained about fan/stan accounts dominating.
+function pushExhausted(queue: string[], freshlyUsed: string[]): string[] {
+  const fans = freshlyUsed.filter((id) => anonymousFanIds.includes(id));
+  if (fans.length === 0) return queue;
+  const merged = [...queue];
+  for (const id of fans) {
+    const existingIdx = merged.indexOf(id);
+    if (existingIdx >= 0) merged.splice(existingIdx, 1);
+    merged.push(id);
+  }
+  // Cap at 10 — the older end falls off so a previously-active fan
+  // eventually rotates back into eligibility.
+  return merged.slice(-10);
+}
+
 // Pithy summary of the most recent event — pushed into currentEventContext
 // at completeEvent time. Replaces dumping the whole activityLog into the
 // single-post prompt (saves ~80-150 tokens per call). Falls back to choice
@@ -2981,7 +3112,24 @@ function applyPostReplies(
   // Missing tone / "attack" / "neutral" all degrade to the base 1A� —
   // safe fallback if the model hallucinates the tone field.
   const crisisActive = s.crisisLevel > 40;
-  const newReplies: ThreadReply[] = (result.replies ?? []).map((r, i) => {
+  // Round 1.11.32 G-Fix #3 — rewrite exhausted fan IDs to fresh ones BEFORE
+  // building newReplies. Celeb authors pass through untouched (the user
+  // only reported fan-account spam dominance, and celebs have their own
+  // follower-scaled posting cadence).
+  const sanitizedReplies = (result.replies ?? []).map((r, i) => {
+    const isFanAuthor =
+      anonymousFanIds.includes(r.characterId) || !!s.fanIdentityCache[r.characterId];
+    if (!isFanAuthor) return r;
+    if (!s.recentCommenters.includes(r.characterId)) return r;
+    return { ...r, characterId: pickFreshFan(s.recentCommenters, i) };
+  });
+  // Round 1.11.32 G-Fix #4 — two-pass build so AI's parentReplyIndex
+  // can be translated into ThreadReply.parentReplyId. Pass 1: assign
+  // each new reply a stable ID. Pass 2: build the ThreadReply with the
+  // parent linked by index → ID translation. Defense rules + likes
+  // calculation stay unchanged.
+  const newReplyIds = sanitizedReplies.map((_, i) => `tr-${baseTime}-${i}`);
+  const newReplies: ThreadReply[] = sanitizedReplies.map((r, i) => {
     const rSrc = findAnyCharacter(r.characterId);
     const rFollowers =
       rSrc && "followers" in rSrc && typeof rSrc.followers === "number"
@@ -2992,13 +3140,27 @@ function applyPostReplies(
       anonymousFanIds.includes(r.characterId) || !!s.fanIdentityCache[r.characterId];
     const isDefender = crisisActive && isFanAuthor && r.tone === "defense";
     const likes = isDefender ? Math.floor(baseLikes * 2.5) : baseLikes;
+    // Resolve parent: explicit AI threading (parentReplyIndex pointing at
+    // an earlier reply) wins over the outer `parentReplyId` arg (sub-
+    // reply to a specific existing thread). Validate the index is in
+    // range and strictly less than current — never forward-reference,
+    // never self-reference.
+    let resolvedParent: string | undefined = parentReplyId;
+    if (
+      typeof r.parentReplyIndex === "number" &&
+      Number.isInteger(r.parentReplyIndex) &&
+      r.parentReplyIndex >= 0 &&
+      r.parentReplyIndex < i
+    ) {
+      resolvedParent = newReplyIds[r.parentReplyIndex];
+    }
     return {
-      id: `tr-${baseTime}-${i}`,
+      id: newReplyIds[i],
       authorId: r.characterId,
       text: r.text,
       likes,
       createdAt: nowLabel(),
-      parentReplyId,
+      parentReplyId: resolvedParent,
     };
   });
   // Player-engagement bump: every refresh that processes a post-replies action
@@ -3161,6 +3323,13 @@ function applyPostReplies(
   // amplify if already in crisis). +25 base bump scales the meter
   // visibly off a single feud spike. We pass the new contacts (post-shift)
   // so detectCrisisTrigger sees the crossing.
+  // Round 1.11.32 G-Fix #3 — push the (sanitized) fan authors from this
+  // batch into the exhaustion queue. Next refresh / next bg fetch sees
+  // them as "recently active" and picks DIFFERENT fans.
+  const nextExhausted = pushExhausted(
+    s.recentCommenters,
+    newReplies.map((r) => r.authorId),
+  );
   let crisisBumped: GameState = {
     ...s,
     player,
@@ -3168,6 +3337,7 @@ function applyPostReplies(
     posts,
     notifications: notification ? [notification, ...s.notifications] : s.notifications,
     fanIdentityCache,
+    recentCommenters: nextExhausted,
   };
   const crisisOrigin = detectCrisisTrigger(s.contacts, contacts);
   if (crisisOrigin) {

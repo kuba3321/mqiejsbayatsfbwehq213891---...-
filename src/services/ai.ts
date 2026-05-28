@@ -2069,7 +2069,18 @@ Make the three options PERSPIRED to the crisis cause — different tones (humble
 export type ReplyTone = "defense" | "attack" | "neutral";
 
 export type PostRepliesResult = {
-  replies: Array<{ characterId: string; text: string; tone?: ReplyTone }>;
+  replies: Array<{
+    characterId: string;
+    text: string;
+    tone?: ReplyTone;
+    // Round 1.11.32 G-Fix #4 — optional pointer at an EARLIER reply in
+    // the same batch (0-based index, must be < current index). When set,
+    // client treats this reply as a sub-thread under that earlier one,
+    // building dynamic conversations between fans / celebs instead of a
+    // flat list addressed only to the original post. Missing / negative
+    // / out-of-range index = top-level reply (current behavior).
+    parentReplyIndex?: number;
+  }>;
   relationshipShifts: Array<{ characterId: string; delta: number; reason: string }>;
   metrics?: { likeBoost?: number; repostBoost?: string };
   playerStatChanges?: { humor?: number; aura?: number };
@@ -2373,13 +2384,28 @@ Generate 5-8 distinct replies total. Mix of:
 EVERY reply must directly address or react to the content of the post above — quote it, riff on it, complain about it, hype it, mock it. No generic "great post" — make each one obviously about THIS post.
 Fan accounts can be hype/critique/jokes; celebrity replies should sound like the named character.
 
+REPLY THREADING (Round 1.11.32 G-Fix #4):
+Replies are an ordered array. Each reply may set "parentReplyIndex" to
+the 0-based index of an EARLIER reply in the same array to make it a
+sub-thread response. Use this to build organic conversations:
+- A fan reacts to the post → no parentReplyIndex (top-level)
+- A second fan @s the first fan and disagrees → parentReplyIndex: 0
+- A celeb cross-comments dropping a jab on a fan → parentReplyIndex: <that fan's idx>
+- A pile-on chain of 2-3 fans dunking on each other → chained parentReplyIndex
+TARGET: ~30-40% of replies should have a parentReplyIndex (creating
+threaded mini-arguments), the rest stay top-level. Make at least one
+sub-thread visible per reply batch so the comment section feels alive.
+NEVER reference a parent index >= the current reply's index — only
+earlier replies are valid parents.
+
 Return STRICT JSON only, no commentary:
 {
   "replies": [
     {
       "characterId": "<id>",
       "text": "<short reply, 1-2 sentences>",
-      "tone": "defense" | "attack" | "neutral"
+      "tone": "defense" | "attack" | "neutral",
+      "parentReplyIndex": <optional 0-based int, omit for top-level>
     }
   ],
   "relationshipShifts": [{ "characterId": "<celebrity id only>", "delta": <-3..3>, "reason": "<one specific sentence referencing the post>" }],

@@ -207,11 +207,29 @@ export type Milestone = {
   skipped?: boolean;
 };
 
+// Round 1.11.32 G-Fix #5 — side-quest conditions are now machine-checkable.
+// Tagged-union covers the four kinds the launch milestones need:
+//   "publish-posts"   — player has authored >= count posts
+//   "trigger-events"  — player has completed >= count events (counted via
+//                       activityLog entries of kind "event-created")
+//   "max-vibe"        — at least one contact's vibe >= threshold
+//   "follower-count"  — player.followers >= threshold
+// The completeSideQuest reducer + GoalsScreen rendering both call
+// evaluateQuestCondition(quest, state) to decide claimability and to
+// surface progress ("2/3 posts"). Quests with no condition (legacy /
+// flavor-only entries) stay tap-to-claim.
+export type SideQuestCondition =
+  | { kind: "publish-posts"; count: number }
+  | { kind: "trigger-events"; count: number }
+  | { kind: "max-vibe"; threshold: number }
+  | { kind: "follower-count"; threshold: number };
+
 export type SideQuest = {
   id: string;
   text: string;
   xp: number;
   completed?: boolean;
+  condition?: SideQuestCondition;
 };
 
 export type ActivityKind =
@@ -430,4 +448,15 @@ export type GameState = {
   // shouldn't survive cold start.
   pendingNextEvent: EventOutcome | null;
   pendingPostSuggestions: string[] | null;
+
+  // ===== Round 1.11.32 G-Fix #3 — Author exhaustion queue =====
+  // Rolling list of fan IDs that just commented or posted. Anyone in
+  // this queue is skipped during fan-slot selection in the bg fetcher
+  // and during reply generation in applyPostReplies, forcing the engine
+  // to pull DIFFERENT fans from the 30-image pool every beat. Capped at
+  // 10 entries via slice — older entries drop off the front so a
+  // previously-active fan eventually rejoins the rotation. Skips the
+  // person who would otherwise comment "all the time" (the user
+  // explicitly reported @stannery_vessel doing this).
+  recentCommenters: string[];
 };
