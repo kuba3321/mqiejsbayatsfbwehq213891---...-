@@ -233,8 +233,12 @@ const initialSideQuests: SideQuest[] = [
     condition: { kind: "publish-posts", count: 3 },
   },
   {
+    // Audit-fix B4 — dropped "of the day". The condition checks the
+    // CUMULATIVE activityLog count of event-created entries, which never
+    // resets, so "of the day" was misleading — the quest completes once,
+    // permanently, after the player's first-ever event.
     id: "first-event",
-    text: "Stir the pot — trigger your first event of the day.",
+    text: "Stir the pot — trigger your first event.",
     xp: 40,
     condition: { kind: "trigger-events", count: 1 },
   },
@@ -303,6 +307,8 @@ function createInitialState(): GameState {
     // fetcher useEffect fills them during idle time.
     pendingNextEvent: null,
     pendingPostSuggestions: null,
+    // F1 — onboarding shown once per save.
+    onboardingSeen: false,
     // Round 1.11.32 G-Fix #3 — start with empty exhaustion queue so
     // Day 1 fan-slot picks have full 30-pool variety.
     recentCommenters: [],
@@ -338,6 +344,16 @@ export function evaluateQuestCondition(
       };
     }
     case "max-vibe": {
+      // Audit-fix B5 — empty cast no longer renders "Best vibe -100".
+      // Without any contacts the reduce seed (-100) leaked into the UI;
+      // now we show an actionable hint instead.
+      const ids = Object.keys(state.contacts);
+      if (ids.length === 0) {
+        return {
+          satisfied: false,
+          progress: "Add a celebrity to your cast first",
+        };
+      }
       const best = Object.values(state.contacts).reduce(
         (acc, c) => Math.max(acc, c.vibe),
         -100,
@@ -416,6 +432,7 @@ type GameContextValue = {
   applySkillStaging: (deltas: { bravery: number; mystery: number; wit: number }) => void;
   toggleHideDMsInLog: () => void;
   dismissToast: () => void;
+  dismissOnboarding: () => void;
   resolveCharacter: (id: string) => (Character & { isOutlet?: boolean }) | undefined;
   updateCharacterOverride: (id: string, patch: Partial<{ avatar: AvatarSource; banner: AvatarSource; name: string; handle: string; bio: string; description: string }>) => void;
 
@@ -540,7 +557,7 @@ function heavyHaptic() {
 function logEntry(args: Omit<ActivityLogEntry, "id" | "createdAt">): ActivityLogEntry {
   return {
     id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    createdAt: `${nowLabel()} �? ${new Date().toLocaleDateString()}`,
+    createdAt: `${nowLabel()} - ${new Date().toLocaleDateString()}`,
     ...args,
   };
 }
@@ -664,6 +681,13 @@ export function GameProvider({ children }: PropsWithChildren) {
         crisisStartedDay: state.crisisStartedDay,
         crisisLayingLow: state.crisisLayingLow,
         prHistory: state.prHistory,
+        // Audit-fix B2 — persist the author-exhaustion queue so the
+        // "don't repeat the same fan 10 picks in a row" rotation survives
+        // close/reopen. Without this, cold start reset the queue to [] and
+        // the first ~10 fetches could re-spam a recently-seen fan.
+        recentCommenters: state.recentCommenters,
+        // F1 — onboarding flag persisted so the tutorial shows exactly once.
+        onboardingSeen: state.onboardingSeen,
       };
       const serialized = JSON.stringify(snapshot);
       if (serialized === lastSavedHashRef.current) return;
@@ -713,6 +737,8 @@ export function GameProvider({ children }: PropsWithChildren) {
     state.crisisStartedDay,
     state.crisisLayingLow,
     state.prHistory,
+    state.recentCommenters,
+    state.onboardingSeen,
   ]);
 
   // ===========================================================
@@ -1657,6 +1683,7 @@ export function GameProvider({ children }: PropsWithChildren) {
       toggleHideDMsInLog: () =>
         setState((s) => ({ ...s, hideDMsInLog: !s.hideDMsInLog })),
       dismissToast: () => setState((s) => ({ ...s, lastToast: null })),
+      dismissOnboarding: () => setState((s) => ({ ...s, onboardingSeen: true })),
 
       resolveCharacter: (id) => {
         const base = allCharacters.find((c) => c.id === id);
@@ -1804,7 +1831,7 @@ export function GameProvider({ children }: PropsWithChildren) {
               day: s.day,
               action: "laying-low" as CrisisAction,
               effect: !s.crisisLayingLow
-                ? "Toggled ON — decay -8/day, followers 0.3A�"
+                ? "Toggled ON — decay -8/day, followers 0.3x"
                 : "Toggled OFF — normal posting resumed",
             },
           ].slice(-20),
@@ -2068,7 +2095,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             const eventLikeBoost = Math.floor(2000 + Math.random() * 3000);
             // Round 1.11.32 Faza D — apply crisisFollowerMult to event
             // gain too. A major event during a 100/100 blackout still
-            // earns some followers (0.1A� of 2000-3000 base �? 200-300)
+            // earns some followers (0.1x of 2000-3000 base ~ 200-300)
             // because the event itself is a big news moment, but the
             // mult conveys "the world is half-ignoring you right now".
             const eventFollowerGain = Math.floor(
@@ -2562,14 +2589,16 @@ export function GameProvider({ children }: PropsWithChildren) {
           scheduledDay,
           createdDay: stateRef.current.day,
         };
+        // Audit-fix B3 — no longer enqueue an "activity-aftermath" pending
+        // action. createActivity resolves the AI outcome inline below
+        // (generateActivityOutcome → setState), so the queued action was
+        // dead weight: refreshFeed Path 2 filters out everything except
+        // "post-replies", meaning the activity-aftermath entry sat in the
+        // queue forever, occupying a slot and never firing.
         setState((s) => ({
           ...s,
           activities: [activity, ...s.activities],
           createActivityOpen: false,
-          pendingActions: [
-            { id: `pa-${Date.now()}`, kind: "activity-aftermath", payload: { activityId } },
-            ...s.pendingActions,
-          ],
           activityLog: [
             logEntry({
               kind: "activity-created",
@@ -2731,7 +2760,7 @@ function rollReplyLikes(authorId: string, followers?: number): number {
     const viral = Math.random() < 0.05;
     return viral
       ? Math.floor(150 + Math.random() * 550) // 150–700 (viral fan)
-      : Math.floor(Math.random() * 150);       // 0–150 (zwykL�y fan)
+      : Math.floor(Math.random() * 150);       // 0–150 (zwykly fan)
   }
   if (followers && followers > 0) {
     const viral = Math.random() < 0.05;
@@ -2768,7 +2797,7 @@ function rollPostLikes(authorId: string, followers: number): number {
 // Player follower growth from a single post-replies refresh or event resolution.
 // Formula: floor((likeBoost * 5% + base 50-200) * presenceBonus)
 // where presenceBonus = 1 + (humor + aura) / 100. Day 1 (humor=0/aura=0)
-// gives 50-200 base. Late game (humor=80/aura=80) multiplies by 2.6A� —
+// gives 50-200 base. Late game (humor=80/aura=80) multiplies by 2.6x —
 // matches the "+415" follower bump from the original Status screenshot.
 // Floor of 50 means even an actionless refresh still moves the needle.
 // Round 1.11.32 Alpha Fix #5 — organic like growth for the player's own
@@ -2841,7 +2870,7 @@ function bumpAllPlayerReplyLikes(
 // =============================================================
 
 // Inspect a contacts transition: did anyone JUST cross the -50 vibe
-// threshold (transitioning from �A-50 to <-50)? Returns the matching
+// threshold (transitioning from >=-50 to <-50)? Returns the matching
 // origin descriptor or null. Skips IDs the player doesn't actually
 // have in their cast — the AI hallucinating a feud with someone the
 // player never added shouldn't trigger a crisis.
@@ -2921,9 +2950,9 @@ function resetCrisisState(): Pick<
 }
 
 // Aggregate follower-gain multiplier based on current crisis state.
-//   * crisisLevel === 100  → 0.1A� (Absolute Blackout — posts ignored)
-//   * crisisLayingLow      → 0.3A� (player is silent, growth muted)
-//   * otherwise            → 1.0A� (normal)
+//   * crisisLevel === 100  → 0.1x (Absolute Blackout — posts ignored)
+//   * crisisLayingLow      → 0.3x (player is silent, growth muted)
+//   * otherwise            → 1.0x (normal)
 // Blackout takes precedence over laying-low so 100 is always 0.1.
 function crisisFollowerMult(s: GameState): number {
   if (s.crisisLevel >= 100) return 0.1;
@@ -3105,11 +3134,11 @@ function applyPostReplies(
   // Earlier Faza D implementation rewarded ALL fan replies during crisis
   // — including hostile pile-on accounts — turning what should be a
   // "viral defense lifts the player" mechanic into "viral chaos".
-  // The new rule fires +2.5A� likes ONLY when ALL three conditions hold:
+  // The new rule fires +2.5x likes ONLY when ALL three conditions hold:
   //   1. crisisLevel > 40
   //   2. reply author is a fan (anonymousFanIds OR ad-hoc fan in cache)
   //   3. AI tagged the reply with tone === "defense"
-  // Missing tone / "attack" / "neutral" all degrade to the base 1A� —
+  // Missing tone / "attack" / "neutral" all degrade to the base 1x —
   // safe fallback if the model hallucinates the tone field.
   const crisisActive = s.crisisLevel > 40;
   // Round 1.11.32 G-Fix #3 — rewrite exhausted fan IDs to fresh ones BEFORE
@@ -3164,7 +3193,7 @@ function applyPostReplies(
     };
   });
   // Player-engagement bump: every refresh that processes a post-replies action
-  // ALSO dosypuje lajki pod istniejącymi komentarzami gracza w tym poL�cie.
+  // ALSO dosypuje lajki pod istniejącymi komentarzami gracza w tym poscie.
   // Skala = humor + aura (z socialPresence). Day-1 floor of 5 keeps the first
   // refresh from feeling completely dead. Without this, player's own replies
   // sit at 0 likes forever — applyPostReplies used to pass them through
@@ -3224,7 +3253,7 @@ function applyPostReplies(
           : `${headlineNames.slice(0, -1).join(", ")} and ${headlineNames[headlineNames.length - 1]} replied`;
 
   // Notification headline uses FULL names + "and N other(s)" suffix to mirror
-  // the original Status format: "Ariana Grande, BeyoncA�, Speed and one other
+  // the original Status format: "Ariana Grande, Beyonce, Speed and one other
   // replied to you" / "Tyler, The Creator, Sabrina Carpenter and 3 others...".
   const notifFullNames = namedReplies.slice(0, 3).map((r) => r.fullName);
   const notifMoreCount = Math.max(0, namedReplies.length - notifFullNames.length);
@@ -3270,7 +3299,7 @@ function applyPostReplies(
   // and modulated by their Humor+Aura presence. Minimum 50 per refresh so the
   // counter always visibly moves.
   // Round 1.11.32 Faza D — crisisFollowerMult throttles growth when the
-  // player is laying low (0.3A�) or in absolute blackout (0.1A�). Applied
+  // player is laying low (0.3x) or in absolute blackout (0.1x). Applied
   // BEFORE the floor so a 50-follower base under blackout becomes 5,
   // matching the "you're invisible right now" UX.
   const followerGain = Math.floor(

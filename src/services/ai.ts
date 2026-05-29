@@ -2,6 +2,11 @@ import { fetch } from "expo/fetch";
 
 import { anonymousFans, anonymousFanIds } from "@/data/worlds";
 import {
+  fallbackAllComments,
+  fallbackThreadChains,
+  pickFallbackThreadChain,
+} from "@/data/fallback";
+import {
   Character,
   ChatMessage,
   ContactState,
@@ -217,53 +222,82 @@ async function callGemini(player: PlayerProfile, opts: LLMOptions) {
   // for unset (stable production tier, well-tested JSON-mode). User can pick
   // 2.5-flash via settings if they want preview-tier quality / want to test it.
   const model = player.model.trim() || "gemini-2.0-flash";
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
-  let response;
-  try {
-    response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(player.apiKey)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: opts.system }] },
-          contents: opts.messages.map((m) => ({
-            role: m.role === "assistant" ? "model" : "user",
-            parts: [{ text: m.content }],
-          })),
-          generationConfig: {
-            temperature: opts.temperature ?? 0.85,
-            maxOutputTokens: opts.maxTokens ?? 320,
-            // Round 1.11.31 — disable Gemini 2.5 family "thinking" / reasoning
-            // tokens. By default 2.5-flash uses dynamic thinking budget which
-            // CONSUMES maxOutputTokens BEFORE the actual response is written.
-            // Symptom: response truncates at ~40 tokens (~150 chars) with
-            // finishReason=MAX_TOKENS even though we set maxOutputTokens=1500
-            // — because reasoning ate the budget.
-            // Our use case is structured-content generation (JSON), not chain-
-            // of-thought reasoning. Setting thinkingBudget=0 disables reasoning
-            // entirely → full budget available for output → faster + cheaper +
-            // no truncation. Field is no-op on 2.0-flash / older models, so
-            // safe to send unconditionally.
-            thinkingConfig: { thinkingBudget: 0 },
-            ...(opts.jsonResponse
-              ? { responseMimeType: "application/json" }
-              : {}),
-          },
-        }),
-        signal: controller.signal,
-      },
-    );
-  } catch (err) {
-    clearTimeout(timeoutId);
-    if ((err as { name?: string })?.name === "AbortError") {
-      console.warn("[ai] Gemini request aborted (4s timeout) — falling back to offline.");
-      throw new Error("Gemini timeout");
+
+  // Round 1.11.32 Faza H — Exponential backoff retry for 503.
+  // Gemini's "High Demand" 503 is transient — the load balancer rotates
+  // capacity faster than humans can perceive. Hammering offline-fallback
+  // on the first 503 leaves the player staring at templated content
+  // when the API would have responded fine 1-5s later. Retry up to 3
+  // total attempts with 1s / 3s / 5s waits between, only for 503.
+  //
+  // We DO NOT retry:
+  //   * 429 (rate limit)   — stamps a longer cooldown via the existing path
+  //   * 401 (invalid key)  — fundamental config error, retry won't help
+  //   * AbortError/timeout — already burned our 10s budget
+  //   * Network exceptions — likely no signal, offline fallback is correct
+  const RETRY_DELAYS_MS = [1000, 3000, 5000];
+  const MAX_503_ATTEMPTS = 3;
+
+  let response: Response | undefined;
+  let lastErr: unknown = undefined;
+  for (let attempt = 0; attempt < MAX_503_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), NETWORK_TIMEOUT_MS);
+    try {
+      response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(player.apiKey)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: opts.system }] },
+            contents: opts.messages.map((m) => ({
+              role: m.role === "assistant" ? "model" : "user",
+              parts: [{ text: m.content }],
+            })),
+            generationConfig: {
+              temperature: opts.temperature ?? 0.85,
+              maxOutputTokens: opts.maxTokens ?? 320,
+              // Round 1.11.31 — thinkingBudget: 0 to skip 2.5 "thinking"
+              // tokens that otherwise eat maxOutputTokens before the
+              // response writes. No-op on 2.0-flash.
+              thinkingConfig: { thinkingBudget: 0 },
+              ...(opts.jsonResponse
+                ? { responseMimeType: "application/json" }
+                : {}),
+            },
+          }),
+          signal: controller.signal,
+        },
+      );
+      clearTimeout(timeoutId);
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if ((err as { name?: string })?.name === "AbortError") {
+        console.warn("[ai] Gemini request aborted (timeout) — falling back to offline.");
+        throw new Error("Gemini timeout");
+      }
+      // Network exception — bail to offline immediately, no retry.
+      throw err;
     }
-    throw err;
+    // 503 → maybe retry. All other statuses (ok or other error) → exit loop.
+    if (response.status === 503 && attempt < MAX_503_ATTEMPTS - 1) {
+      const delayMs = RETRY_DELAYS_MS[attempt];
+      console.warn(
+        `[ai] Gemini 503 High Demand (attempt ${attempt + 1}/${MAX_503_ATTEMPTS}) — retrying in ${delayMs}ms`,
+      );
+      lastErr = new Error("Gemini 503");
+      await new Promise((r) => setTimeout(r, delayMs));
+      continue;
+    }
+    break; // got a response (ok or non-503 error) — fall through
   }
-  clearTimeout(timeoutId);
+  if (!response) {
+    // All 3 attempts came back 503 OR every attempt threw network exception.
+    // Treat as offline path.
+    console.warn("[ai] Gemini 503 persisted across 3 attempts — falling back to offline.");
+    throw lastErr instanceof Error ? lastErr : new Error("Gemini 503");
+  }
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "");
@@ -273,21 +307,21 @@ async function callGemini(player: PlayerProfile, opts: LLMOptions) {
     if (response.status === 429) {
       const retryMatch = errText.match(/retry in ([\d.]+)s/i);
       const retrySeconds = retryMatch ? parseFloat(retryMatch[1]) : 60;
-      // Round 1.11.24 — add +3s safety buffer on top of API's hint. Starting
-      // exactly at retrySeconds-from-now reliably re-hits 429 because the
-      // per-minute window has only just opened. Empirically a few seconds
-      // of grace prevents the "second-wave 51.5s" cascade observed in
-      // 1.11.23 logs.
+      // Round 1.11.24 — add +3s safety buffer on top of API's hint.
       const totalCooldownMs = retrySeconds * 1000 + GEMINI_COOLDOWN_BUFFER_MS;
       geminiCooldownUntilMs = Date.now() + totalCooldownMs;
       console.warn(
         `[ai] Gemini 429 quota exhausted — cooldown for ${(totalCooldownMs / 1000).toFixed(1)}s ` +
-          `(API hint ${retrySeconds.toFixed(1)}s + ${GEMINI_COOLDOWN_BUFFER_MS / 1000}s safety). ` +
-          `Tip: consider switching player.model to "gemini-2.0-flash" (production tier has higher RPM than 2.5 preview).`,
+          `(API hint ${retrySeconds.toFixed(1)}s + ${GEMINI_COOLDOWN_BUFFER_MS / 1000}s safety).`,
+      );
+    } else if (response.status === 503) {
+      // 503 after exhausting retries — log distinct from the in-loop
+      // attempts so console diagnostics make it obvious we tried.
+      console.warn(
+        `[ai] Gemini 503 final after ${MAX_503_ATTEMPTS} retries — offline path engaging.`,
       );
     } else {
-      // 503 High Demand / 401 Invalid Key — recoverable, warn level
-      // keeps Expo Go's LogBox calm; the throw triggers offline fallback.
+      // 401 Invalid Key, 400 malformed, etc — recoverable warn level.
       console.warn(`[ai] Gemini ${response.status}:`, errText.slice(0, 500));
     }
     throw new Error(`Gemini ${response.status}`);
@@ -1603,15 +1637,25 @@ function buildOfflineSinglePost(args: {
   fanLineBank: string[];
   fanCommentBank: string[];
 }): SinglePostResult {
+  // Round 1.11.32 Faza H — wider thread reply pool. Old buildOfflineThreadReplies
+  // pulled from a tiny scenario bank; user complained "always 5 comments,
+  // always feels canned". We now merge:
+  //   • scenario bank (voice consistency)
+  //   • fallbackAllComments (100+ generic vibes)
+  // and let the count vary widely instead of locking 2-5.
+  const wideCommentBank = [...args.fanCommentBank, ...fallbackAllComments];
+
   if (args.isFan || !args.character) {
     const fanIds = anonymousFanIds;
     const author = pickRandom(fanIds);
     const text = pickRandom(args.fanLineBank);
-    const replyCount = 2 + Math.floor(Math.random() * 3); // 2-4
+    // Fan post pulls fewer replies than a celeb post (smaller reach).
+    // 1-6 instead of locked 2-4.
+    const replyCount = 1 + Math.floor(Math.random() * 6);
     return {
       characterId: author,
       text,
-      threadReplies: buildOfflineThreadReplies(fanIds, args.fanCommentBank).slice(0, replyCount),
+      threadReplies: buildOfflineThreadReplies(fanIds, wideCommentBank).slice(0, replyCount),
     };
   }
   // Celeb path — reuse the same template selector buildOfflineWorldUpdate uses.
@@ -1622,11 +1666,12 @@ function buildOfflineSinglePost(args: {
     `Whatever ${args.character.name.split(" ")[0]} is doing tonight is rewiring the feed.`,
   ];
   const line = pickRandom(charBank && charBank.length > 0 ? charBank : fallback);
-  const replyCount = 3 + Math.floor(Math.random() * 3); // 3-5 (celeb posts pull more)
+  // Celeb post pulls a wider crowd: 2-9 replies (was 3-5).
+  const replyCount = 2 + Math.floor(Math.random() * 8);
   return {
     characterId: args.character.id,
     text: line,
-    threadReplies: buildOfflineThreadReplies(anonymousFanIds, args.fanCommentBank).slice(0, replyCount),
+    threadReplies: buildOfflineThreadReplies(anonymousFanIds, wideCommentBank).slice(0, replyCount),
   };
 }
 
@@ -1700,13 +1745,33 @@ Chemistry with the player: ${args.contactChemistry ?? "neutral"}. Adjust tone ac
 Write a single in-character 1-2 sentence feed post.`
       : `You are a verified account posting on a Twitter/X-style feed as @${args.characterId}. Write a single 1-2 sentence in-character feed post.`;
 
-  const eventBlock = args.relateToEvent && args.currentEventContext
-    ? `Recent event the post SHOULD react to: ${args.currentEventContext}`
-    : `Recent event context (DO NOT directly reference — keep this post off-topic / lifestyle): ${args.currentEventContext ?? "(none yet)"}`;
+  // Round 1.11.32 Faza H — hard token-budget caps. The bg fetcher runs
+  // this prompt N times per day; uncapped context can balloon the
+  // payload across crisis + event + recent-actions blocks and tip
+  // borderline-busy Gemini regions into 503 territory. Caps below
+  // mirror the empirically safe budget we observed during the 1.11.30
+  // tier change: ~250 tok system + ~80 tok user content = comfortable.
+  const CONTEXT_CHAR_CAP = 220; // ~55 tokens at 1 token ≈ 4 chars
+  const ACTION_CHAR_CAP = 70; // each individual recent-action line
+  const trimmedContext = args.currentEventContext
+    ? args.currentEventContext.slice(0, CONTEXT_CHAR_CAP)
+    : null;
 
-  const recentBlock =
+  const eventBlock = args.relateToEvent && trimmedContext
+    ? `Recent event the post SHOULD react to: ${trimmedContext}`
+    : `Recent event context (DO NOT directly reference — keep this post off-topic / lifestyle): ${trimmedContext ?? "(none yet)"}`;
+
+  // Last 2 actions only (we already slice -2 below) + per-line cap so
+  // a runaway log entry can't single-handedly bloat the prompt.
+  const trimmedActions =
     args.recentPlayerActions && args.recentPlayerActions.length > 0
-      ? `Last player actions: ${args.recentPlayerActions.slice(-2).join(" | ")}`
+      ? args.recentPlayerActions
+          .slice(-2)
+          .map((a) => (a.length > ACTION_CHAR_CAP ? a.slice(0, ACTION_CHAR_CAP) + "…" : a))
+      : [];
+  const recentBlock =
+    trimmedActions.length > 0
+      ? `Last player actions: ${trimmedActions.join(" | ")}`
       : "";
 
   // Round 1.11.32 Faza D — crisis prompt block. Token-gated by the
@@ -1756,7 +1821,13 @@ REPLY AUTHOR POOLS:
 - Celeb cross-commenters (other stars from the active cast — pick MAX 1-2 per post to weave in branżowe interakcje):
   ${
     args.castCelebIds && args.castCelebIds.filter((id) => id !== args.characterId).length > 0
-      ? args.castCelebIds.filter((id) => id !== args.characterId).join(", ")
+      // Round 1.11.32 Faza H — cap to first 5 to keep the prompt tight.
+      // A 10-member cast list adds ~80 tokens for marginal model benefit;
+      // the cross-comment instruction only needs a handful of candidates.
+      ? args.castCelebIds
+          .filter((id) => id !== args.characterId)
+          .slice(0, 5)
+          .join(", ")
       : "(no other celebs available)"
   }
 
@@ -2236,39 +2307,138 @@ function buildOfflinePostReplies(args: {
   // Round 1.11.15 — optional world for scenario-aware fan reply voice.
   world?: World;
 }): PostRepliesResult {
-  // Round 1.11.15 — empty cast is NO LONGER a failure case. Fans always
-  // reply even when the player hasn't added any celebrity to their contacts.
-  // The feed should never look dead on Day 1.
+  // Round 1.11.32 Faza H — dynamic offline reply generation.
+  // Old version: locked celeb=2-3 + fan=4-9 → always 6-12, no threading,
+  // pool only ~20 lines (scenario bank). User complaint: "always 5
+  // comments under every post, no dynamics".
+  //
+  // New version:
+  //   • Total count varies 1-12 (true random; sometimes feels intimate,
+  //     sometimes feels viral).
+  //   • Pool unified: scenario bank + 100+ fallback comments → ~120
+  //     unique lines, so "deja vu repeats" feel rare even after a
+  //     prolonged outage.
+  //   • Threading: 20% chance per reply gets a parentReplyIndex (replies
+  //     to an earlier sibling instead of the original post).
+  //   • Thread chains: 30% chance to splice in a pre-baked conversation
+  //     chain (3-4 connected replies that read like real reply-quote-
+  //     dunk arguments).
   const shuffled = [...args.characters].sort(() => Math.random() - 0.5);
-  // Match the online prompt: only 2-3 celebrities ever reply, not the whole cast.
-  const celebCount = 2 + Math.floor(Math.random() * 2); // 2 or 3
-  const celebrities = shuffled.slice(0, Math.min(celebCount, shuffled.length));
-  const fanCount = 4 + Math.floor(Math.random() * 6); // 4-9 fans
+  const totalCount = 1 + Math.floor(Math.random() * 12); // 1..12
+  // Celeb cap: up to 3, never more than the dynamic total or the cast size.
+  // Celebs appear in the FIRST third of the batch so they read like the
+  // big names showing up first.
+  const celebCap = Math.min(
+    3,
+    Math.floor(totalCount / 3) + 1,
+    shuffled.length,
+  );
+  const celebrities = shuffled.slice(0, celebCap);
   const fanIds = anonymousFanIds;
-  // Scenario-aware fan reply bank — falls back to generic offlineFanReplyBank
-  // when the active world has no scenario entry.
-  const fanReplyLineBank =
+  const baseFanBank =
     (args.world && scenarioFanReplyBank[args.world.id]) ?? offlineFanReplyBank;
+  // Unified bank: scenario voice + Faza H's 100+ generic vibes.
+  const wideFanBank = [...baseFanBank, ...fallbackAllComments];
   const usedFanLines = new Set<string>();
-  const fans: Array<{ characterId: string; text: string }> = [];
-  for (let i = 0; i < fanCount; i++) {
-    let text = pickRandomReply(fanReplyLineBank);
-    let attempts = 0;
-    while (usedFanLines.has(text) && attempts < 5) {
-      text = pickRandomReply(fanReplyLineBank);
-      attempts++;
+  const pickFreshFanLine = (): string => {
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const text = pickRandomReply(wideFanBank);
+      if (!usedFanLines.has(text)) {
+        usedFanLines.add(text);
+        return text;
+      }
     }
-    usedFanLines.add(text);
-    fans.push({ characterId: pickRandomReply(fanIds), text });
+    // Pool exhausted (huge batch + tight repeats) — let the last pick
+    // through; dupes are rarer than under the old narrow bank.
+    return pickRandomReply(wideFanBank);
+  };
+
+  const replies: PostRepliesResult["replies"] = [];
+
+  // Maybe seed a pre-baked thread chain. 30% chance, requires room.
+  let chainPos = 0;
+  let chainData: string[] | null = null;
+  const tryStartChain = (i: number, remaining: number) => {
+    if (chainData) return false;
+    if (i === 0) return false; // chain needs an anchor to thread off
+    if (remaining < 3) return false;
+    if (Math.random() >= 0.3) return false;
+    const chain = pickFallbackThreadChain();
+    chainData = chain.slice(0, Math.min(chain.length, remaining));
+    chainPos = 0;
+    return true;
+  };
+
+  for (let i = 0; i < totalCount; i++) {
+    // Round 1.11.32 Faza H — capture chainData into a local snapshot
+    // each iteration. TS's control-flow analysis loses track of
+    // closure-mutated `let`s across the tryStartChain call, narrowing
+    // chainData to `never` later in the loop. The const snapshot bypasses
+    // that without changing runtime behavior.
+    const currentChain = chainData as string[] | null;
+    // Continue an in-flight chain — each entry threads off the previous.
+    if (currentChain && chainPos < currentChain.length) {
+      const text = currentChain[chainPos];
+      const parentReplyIndex =
+        chainPos === 0 ? Math.floor(Math.random() * i) : i - 1;
+      replies.push({
+        characterId: pickRandomReply(fanIds),
+        text,
+        parentReplyIndex,
+      });
+      chainPos++;
+      if (chainPos >= currentChain.length) {
+        chainData = null;
+      }
+      continue;
+    }
+
+    // Possibly START a new chain on this index.
+    if (tryStartChain(i, totalCount - i)) {
+      const startedChain = chainData as string[] | null;
+      if (startedChain) {
+        const text = startedChain[0];
+        const parentReplyIndex = Math.floor(Math.random() * i);
+        replies.push({
+          characterId: pickRandomReply(fanIds),
+          text,
+          parentReplyIndex,
+        });
+        chainPos = 1;
+        if (chainPos >= startedChain.length) {
+          chainData = null;
+        }
+        continue;
+      }
+    }
+
+    // Default: celeb (first few slots) or fan crowd line.
+    const celebSlotIdx = i; // celebs occupy the first celebrities.length slots
+    if (celebSlotIdx < celebrities.length) {
+      const c = celebrities[celebSlotIdx];
+      replies.push({
+        characterId: c.id,
+        text: offlineReplyBank[c.id]
+          ? pickRandomReply(offlineReplyBank[c.id])
+          : c.starterPosts?.[Math.floor(Math.random() * (c.starterPosts.length || 1))] ??
+            c.bio,
+      });
+      continue;
+    }
+
+    // Fan reply. 20% chance threaded onto an earlier sibling.
+    const text = pickFreshFanLine();
+    const threaded = i > 0 && Math.random() < 0.2;
+    const parentReplyIndex = threaded ? Math.floor(Math.random() * i) : undefined;
+    replies.push({
+      characterId: pickRandomReply(fanIds),
+      text,
+      parentReplyIndex,
+    });
   }
-  const celebReplies = celebrities.map((c) => ({
-    characterId: c.id,
-    text: offlineReplyBank[c.id]
-      ? pickRandomReply(offlineReplyBank[c.id])
-      : c.starterPosts?.[Math.floor(Math.random() * (c.starterPosts.length || 1))] ?? c.bio,
-  }));
+
   return {
-    replies: [...celebReplies, ...fans],
+    replies,
     relationshipShifts: celebrities.map((c, i) => ({
       characterId: c.id,
       delta: i % 2 === 0 ? 1.2 + Math.random() : -0.3 - Math.random() * 0.6,
@@ -2281,11 +2451,9 @@ function buildOfflinePostReplies(args: {
       likeBoost: Math.floor(800 + Math.random() * 4000),
       repostBoost: `${(2 + Math.random() * 30).toFixed(1)}K`,
     },
-    // Round 1.11 — decimal scale, ONE decimal precision. Slight positive bias
-    // so the player feels progress from offline fallback content too.
     playerStatChanges: {
-      humor: Math.round((Math.random() * 1.4 - 0.2) * 10) / 10, // -0.2..1.2
-      aura: Math.round((Math.random() * 1.2 - 0.2) * 10) / 10,   // -0.2..1.0
+      humor: Math.round((Math.random() * 1.4 - 0.2) * 10) / 10,
+      aura: Math.round((Math.random() * 1.2 - 0.2) * 10) / 10,
     },
   };
 }

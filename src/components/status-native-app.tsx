@@ -34,6 +34,7 @@ import {
   X,
   Zap,
 } from "lucide-react-native";
+import * as Haptics from "expo-haptics";
 import * as ImagePicker from "expo-image-picker";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -798,6 +799,8 @@ function GameShell() {
       {/* Round 1.11.32 Faza D — PR Actions modal mounted at shell level
           so any screen can open it (CrisisBar tap, future toast CTAs). */}
       <PRActionsModal />
+      {/* F1 — first-run tutorial overlay. Self-gates on onboardingSeen. */}
+      <OnboardingOverlay />
     </View>
   );
 
@@ -810,9 +813,20 @@ function GameShell() {
   }) {
     const active = state.activeTab === tab;
     const showDot = tab === "alerts" && state.notifications.length > 0;
+    // F11 — readable tab names for screen readers.
+    const tabLabel: Record<GameTab, string> = {
+      feed: "Feed",
+      goals: "Goals",
+      messages: "Messages",
+      alerts: "Notifications",
+      profile: "Profile",
+    };
     return (
       <Pressable
         onPress={() => setActiveTab(tab)}
+        accessibilityRole="tab"
+        accessibilityState={{ selected: active }}
+        accessibilityLabel={tabLabel[tab]}
         style={({ pressed }) => ({
           width: 56,
           height: 56,
@@ -895,7 +909,15 @@ function CrisisBar() {
   const layingLow = state.crisisLayingLow;
   return (
     <Pressable
-      onPress={() => setPRActionsOpen(true)}
+      onPress={() => {
+        // Audit-fix I4 — Medium haptic on opening the crisis PR menu.
+        // This is a high-stakes surface; a meatier click than the ambient
+        // Light selection feedback matches its weight.
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(
+          () => undefined,
+        );
+        setPRActionsOpen(true);
+      }}
       style={({ pressed }) => ({
         marginTop: 10,
         paddingHorizontal: 14,
@@ -1051,6 +1073,9 @@ function FeedScreen() {
         <Pressable
           onPress={triggerEvent}
           disabled={state.isGenerating}
+          accessibilityRole="button"
+          accessibilityLabel={`Trigger event, up to ${xpRange.hi} XP`}
+          accessibilityState={{ disabled: state.isGenerating }}
           style={({ pressed }) => ({
             minHeight: 56,
             paddingHorizontal: 22,
@@ -1083,6 +1108,8 @@ function FeedScreen() {
           Post is purely right-aligned. */}
       <Pressable
         onPress={() => setComposeOpen(true)}
+        accessibilityRole="button"
+        accessibilityLabel="Compose a new post"
         style={({ pressed }) => ({
           position: "absolute",
           right: 18,
@@ -2897,26 +2924,106 @@ function ProfileScreen() {
             View all
           </AppText>
         </View>
-        <Card style={{ gap: 12, alignItems: "center" }}>
-          <View
-            style={{
-              width: 40,
-              height: 40,
-              borderRadius: 20,
-              backgroundColor: colors.surfaceAlt,
-              alignItems: "center",
-              justifyContent: "center",
-            }}
-          >
-            <AppText size={20}>🎬</AppText>
+        {/* Audit-fix I7 — render scheduled activities (state.activities was
+            populated by createActivity but never surfaced). Upcoming
+            (scheduledDay >= today, unresolved) listed first; resolved ones
+            show their outcome. Empty state keeps the create CTA. */}
+        {state.activities.length === 0 ? (
+          <Card style={{ gap: 12, alignItems: "center" }}>
+            <View
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 20,
+                backgroundColor: colors.surfaceAlt,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <AppText size={20}>🎬</AppText>
+            </View>
+            <AppText size={13} color={colors.muted2} style={{ textAlign: "center" }}>
+              Create activities and roleplay with your characters
+            </AppText>
+            <CapsuleButton size="md" onPress={() => setCreateActivityOpen(true)}>
+              + Create activity
+            </CapsuleButton>
+          </Card>
+        ) : (
+          <View style={{ gap: 10 }}>
+            {state.activities.slice(0, 6).map((act) => {
+              const upcoming = !act.resolved && act.scheduledDay >= state.day;
+              const inviteeAvatars = act.inviteeIds
+                .map((id) => resolveCharacter(id))
+                .filter(Boolean)
+                .slice(0, 4) as Array<{ avatar: AvatarSource; name: string }>;
+              return (
+                <Card key={act.id} style={{ gap: 8 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                    <AppText size={15} weight="900" style={{ flex: 1 }} numberOfLines={1}>
+                      {act.title}
+                    </AppText>
+                    <View
+                      style={{
+                        paddingHorizontal: 10,
+                        paddingVertical: 4,
+                        borderRadius: 999,
+                        backgroundColor: upcoming
+                          ? "rgba(58,150,255,0.16)"
+                          : colors.surfaceAlt,
+                      }}
+                    >
+                      <AppText
+                        size={11}
+                        weight="800"
+                        color={upcoming ? colors.blue : colors.muted2}
+                      >
+                        {upcoming ? `Day ${act.scheduledDay}` : "Resolved"}
+                      </AppText>
+                    </View>
+                  </View>
+                  {act.description ? (
+                    <AppText size={13} color={colors.muted2} numberOfLines={2}>
+                      {act.description}
+                    </AppText>
+                  ) : null}
+                  {inviteeAvatars.length > 0 ? (
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: -6 }}>
+                      {inviteeAvatars.map((iv, idx) => (
+                        <View key={idx} style={{ marginLeft: idx === 0 ? 0 : -6 }}>
+                          <Avatar uri={iv.avatar} size={24} ring={colors.surface} ringWidth={2} />
+                        </View>
+                      ))}
+                      <AppText size={12} color={colors.muted2} style={{ marginLeft: 8 }}>
+                        {act.inviteeIds.length} invited
+                      </AppText>
+                    </View>
+                  ) : null}
+                  {act.resolved && act.outcome ? (
+                    <View
+                      style={{
+                        borderTopColor: colors.divider,
+                        borderTopWidth: 1,
+                        paddingTop: 8,
+                      }}
+                    >
+                      <AppText size={13} color={colors.muted}>
+                        {act.outcome}
+                      </AppText>
+                    </View>
+                  ) : null}
+                </Card>
+              );
+            })}
+            <CapsuleButton
+              size="md"
+              color={colors.surfaceAlt}
+              onPress={() => setCreateActivityOpen(true)}
+            >
+              + Create activity
+            </CapsuleButton>
           </View>
-          <AppText size={13} color={colors.muted2} style={{ textAlign: "center" }}>
-            Create activities and roleplay with your characters
-          </AppText>
-          <CapsuleButton size="md" onPress={() => setCreateActivityOpen(true)}>
-            + Create activity
-          </CapsuleButton>
-        </Card>
+        )}
 
         <AppText size={18} weight="900" style={{ marginTop: 22, marginBottom: 10 }}>
           Relationships ({Object.keys(state.contacts).length})
@@ -3838,7 +3945,7 @@ function AppSettingsModal() {
               Account details
             </AppText>
             <Card style={{ gap: 0 }}>
-              <SettingsRow icon={<User color={colors.muted2} size={16} />} label="Username" value="lokmtjTBDU" trailing={<Copy color={colors.muted} size={14} />} />
+              <SettingsRow icon={<User color={colors.muted2} size={16} />} label="Username" value={state.player.handle.replace(/^@/, "")} trailing={<Copy color={colors.muted} size={14} />} />
               <Divider />
               <SettingsRow icon={<LinkIcon color={colors.muted2} size={16} />} label="Link account" value="Link" valueColor={colors.blue} />
               <Divider />
@@ -5795,17 +5902,32 @@ function PRActionsModal() {
   const insets = useSafeAreaInsets();
   const [stunts, setStunts] = useState<PRStuntOption[]>([]);
   const [loadingStunts, setLoadingStunts] = useState(false);
+  // Audit-fix I2 — cache the fetched stunt set so open→close→reopen
+  // without acting doesn't burn a second AI call. We key the cache on
+  // crisisLevel: if the player reopens at the SAME crisis level we reuse
+  // the prior options; any crisis movement (PR stunt, decay, escalation)
+  // invalidates the cache and refetches fresh, origin-appropriate moves.
+  const stuntCacheRef = useRef<{ level: number; opts: PRStuntOption[] } | null>(null);
 
-  // Fetch stunts on every open — keep the 3 options fresh & contextual to
-  // the CURRENT crisis state. The offline bank shuffles itself anyway.
   useEffect(() => {
     if (!prActionsOpen) return;
     let cancelled = false;
+    // Cache hit — same crisis level as the last fetch. Reuse instantly,
+    // skip the network/offline round-trip entirely.
+    const cached = stuntCacheRef.current;
+    if (cached && cached.level === state.crisisLevel && cached.opts.length > 0) {
+      setStunts(cached.opts);
+      setLoadingStunts(false);
+      return;
+    }
     setLoadingStunts(true);
     setStunts([]);
     fetchPRStuntOptions()
       .then((opts) => {
-        if (!cancelled) setStunts(opts);
+        if (!cancelled) {
+          setStunts(opts);
+          stuntCacheRef.current = { level: state.crisisLevel, opts };
+        }
       })
       .finally(() => {
         if (!cancelled) setLoadingStunts(false);
@@ -5813,7 +5935,7 @@ function PRActionsModal() {
     return () => {
       cancelled = true;
     };
-  }, [prActionsOpen, fetchPRStuntOptions]);
+  }, [prActionsOpen, fetchPRStuntOptions, state.crisisLevel]);
 
   // Divert cooldown — same target may not be diverted on twice in <3 days.
   const divertCooldownTarget = (id: string): boolean => {
@@ -6018,6 +6140,128 @@ function PRActionsModal() {
             )}
           </View>
         </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
+// ===================================================================
+//  ONBOARDING OVERLAY — F1
+// ===================================================================
+// First-run 4-card tutorial. Renders as a full-screen modal the first
+// time the player lands in the Game phase (onboardingSeen === false).
+// Explains the core loops: the feed economy, relationships/chemistry,
+// events, and crisis. Skip jumps straight to dismiss; Next walks the
+// cards; the last card's button dismisses. Shows once per save.
+const ONBOARDING_CARDS: Array<{
+  emoji: string;
+  title: string;
+  body: string;
+}> = [
+  {
+    emoji: "📱",
+    title: "This is your timeline",
+    body: "Post to the feed, reply to celebrities, and watch the world react in real time. Every post spends 1 energy — you refill it by triggering Events.",
+  },
+  {
+    emoji: "💞",
+    title: "Vibe & Chemistry",
+    body: "Add celebrities to your cast from Messages. Each has a Vibe (−100…+100) and a Chemistry style (rivals, lovers, co-conspirators…). Your posts and replies nudge their Vibe up or down.",
+  },
+  {
+    emoji: "📣",
+    title: "Events move the day",
+    body: "Tap the Event button to trigger a story beat. Choosing an outcome rolls the day forward, refills energy, and earns XP toward Milestones. Humor & Aura are your social-presence stats — grow them to gain followers faster.",
+  },
+  {
+    emoji: "🔥",
+    title: "Mind the Crisis meter",
+    body: "Beef with a celebrity (Vibe below −50) or a bad event choice can spark a Crisis. When it flares, open the PR menu: issue a statement, lay low, or divert the heat onto someone else. Let it hit 100 and the internet turns on you.",
+  },
+];
+
+function OnboardingOverlay() {
+  const { state, dismissOnboarding } = useGame();
+  const insets = useSafeAreaInsets();
+  const [card, setCard] = useState(0);
+  // Only show in-game, once per save.
+  const visible = state.phase === "game" && !state.onboardingSeen;
+  if (!visible) return null;
+  const isLast = card >= ONBOARDING_CARDS.length - 1;
+  const c = ONBOARDING_CARDS[card];
+  return (
+    <Modal visible transparent animationType="fade" onRequestClose={dismissOnboarding}>
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: "rgba(0,0,0,0.82)",
+          paddingTop: insets.top + 20,
+          paddingBottom: insets.bottom + 20,
+          paddingHorizontal: 22,
+          justifyContent: "center",
+        }}
+      >
+        {/* Skip — top right */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Skip tutorial"
+          onPress={dismissOnboarding}
+          hitSlop={12}
+          style={{ position: "absolute", top: insets.top + 16, right: 20 }}
+        >
+          <AppText size={14} color={colors.muted2} weight="700">
+            Skip
+          </AppText>
+        </Pressable>
+
+        <View
+          style={{
+            backgroundColor: colors.surface,
+            borderRadius: radii.lg,
+            borderColor: colors.purple,
+            borderWidth: 1,
+            padding: 24,
+            gap: 14,
+            alignItems: "center",
+          }}
+        >
+          <AppText size={52}>{c.emoji}</AppText>
+          <AppText size={22} weight="900" style={{ textAlign: "center" }}>
+            {c.title}
+          </AppText>
+          <AppText
+            size={15}
+            color={colors.muted2}
+            style={{ textAlign: "center", lineHeight: 22 }}
+          >
+            {c.body}
+          </AppText>
+
+          {/* Progress dots */}
+          <View style={{ flexDirection: "row", gap: 7, marginTop: 4 }}>
+            {ONBOARDING_CARDS.map((_, i) => (
+              <View
+                key={i}
+                style={{
+                  width: i === card ? 22 : 7,
+                  height: 7,
+                  borderRadius: 4,
+                  backgroundColor: i === card ? colors.blue : colors.surfaceSoft,
+                }}
+              />
+            ))}
+          </View>
+
+          <CapsuleButton
+            onPress={() => {
+              if (isLast) dismissOnboarding();
+              else setCard((n) => n + 1);
+            }}
+            style={{ alignSelf: "stretch", marginTop: 6 }}
+          >
+            {isLast ? "Start playing" : "Next"}
+          </CapsuleButton>
+        </View>
       </View>
     </Modal>
   );

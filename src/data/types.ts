@@ -449,6 +449,12 @@ export type GameState = {
   pendingNextEvent: EventOutcome | null;
   pendingPostSuggestions: string[] | null;
 
+  // F1 — onboarding tutorial gate. false until the player dismisses (or
+  // skips) the first-run 4-card overlay. Persisted so the tutorial only
+  // ever shows once per save. Reset to false on resetSave (fresh start
+  // should re-teach).
+  onboardingSeen: boolean;
+
   // ===== Round 1.11.32 G-Fix #3 — Author exhaustion queue =====
   // Rolling list of fan IDs that just commented or posted. Anyone in
   // this queue is skipped during fan-slot selection in the bg fetcher

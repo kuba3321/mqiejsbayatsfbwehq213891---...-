@@ -195,6 +195,11 @@ export function CapsuleButton({
     <Pressable
       onPress={onPress}
       disabled={disabled}
+      // F11 — primary buttons announce as buttons + their disabled state.
+      // Label is auto-derived from the text child by the platform, so we
+      // only need role + state here.
+      accessibilityRole="button"
+      accessibilityState={{ disabled: !!disabled }}
       style={({ pressed }) => ({
         minHeight: height,
         borderRadius: radii.pill,
@@ -220,15 +225,22 @@ export function IconButton({
   size = 44,
   color = colors.surfaceAlt,
   style,
+  accessibilityLabel,
 }: PropsWithChildren<{
   onPress?: () => void;
   size?: number;
   color?: string;
   style?: ViewStyle;
+  // F11 — screen-reader label. Icon-only buttons are invisible to
+  // VoiceOver/TalkBack without it; passing a short verb phrase ("Close",
+  // "Open settings", "Back") makes every icon control announceable.
+  accessibilityLabel?: string;
 }>) {
   return (
     <Pressable
       onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
       style={({ pressed }) => ({
         width: size,
         height: size,
