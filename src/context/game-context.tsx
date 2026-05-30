@@ -64,6 +64,7 @@ import {
   resolveEventChoice,
 } from "@/services/ai";
 // sentiment.ts now only re-exports clampPercent; calculateVibeBump was removed.
+import { clampPercent } from "@/services/sentiment";
 import { formatRepostCount, parseRepostCount } from "@/utils/formatters";
 
 const GAME_STATE_PATH = (FileSystem.documentDirectory ?? "") + "status_game_state.json";
@@ -317,6 +318,19 @@ function createInitialState(): GameState {
     recentCommenters: [],
     // Faza J #3 — assume online until the first call says otherwise.
     aiOnline: true,
+    // Fala 1 #5 — empty mute list on fresh save. Toggle via
+    // toggleMuteCharacter from CharacterProfileModal's bell button.
+    mutedCharacterIds: [],
+    // Fala 2 — favorites tracked separately for posts vs replies so
+    // the Favorites tab can render two clean lists.
+    favoritedPostIds: [],
+    favoritedReplyIds: [],
+    // Fala 3 — reports / win cycle / auto-DM defaults.
+    reports: [],
+    mainGoalCompletedDay: null,
+    goalsCompleted: 0,
+    lastWinReveal: null,
+    autoContactConfig: {},
     // Round 1.11.32 Faza E — crisis defaults via resetCrisisState helper.
     // Same shape consumed by initializeCharacter on scenario rollover.
     ...resetCrisisState(),
@@ -434,6 +448,24 @@ type GameContextValue = {
   setCreateActivityOpen: (open: boolean) => void;
   setEditingCharacterId: (id: string | null) => void;
   setActiveChatId: (id: string | null) => void;
+  // Fala 1 #5 — bell-toggle on CharacterProfileModal. Filters out
+  // notifications for the muted character in NotificationsScreen.
+  toggleMuteCharacter: (id: string) => void;
+  // Fala 2 — star toggle on posts + thread replies. Surfaced in
+  // ProfileScreen "Favorites" section.
+  toggleFavoritePost: (postId: string) => void;
+  toggleFavoriteReply: (replyId: string) => void;
+  // Fala 3 — report a post. justified flag is computed from the
+  // post's tone (attacker → justified) at call-time, mutated state
+  // dispatches reputation effects via the reducer.
+  reportPost: (postId: string) => void;
+  // Fala 3 — auto-DM scheduler config update.
+  setAutoContactConfig: (
+    id: string,
+    cfg: { dmIntensity: number; inviteIntensity: number },
+  ) => void;
+  // Fala 3 — dismiss win screen + advance to next goal tier.
+  dismissWinScreen: () => void;
   applySkillStaging: (deltas: { bravery: number; mystery: number; wit: number }) => void;
   toggleHideDMsInLog: () => void;
   dismissToast: () => void;
@@ -476,7 +508,13 @@ type GameContextValue = {
   createCustomCharacter: (input: { name: string; handle: string; bio: string; description: string; avatar: string; banner: string; systemPrompt: string }) => string;
   removeCharacter: (id: string) => void;
   sendChatMessage: (characterId: string, text: string) => Promise<void>;
-  createActivity: (input: { title: string; description: string; inviteeIds: string[]; scheduledDay: number }) => Promise<void>;
+  createActivity: (input: {
+    title: string;
+    description: string;
+    inviteeIds: string[];
+    scheduledDay: number;
+    scheduledHour?: number;
+  }) => Promise<void>;
   rateOutcome: (id: string, rating: 1 | 2 | 3 | 4 | 5) => void;
   undoLastAction: () => void;
   generateCustomScenario: (prompt: string) => Promise<World | null>;
@@ -493,7 +531,10 @@ function withXP(state: GameState, amount: number): GameState {
   while (xp >= xpRequired) {
     xp -= xpRequired;
     level += 1;
-    skillPoints += 2;
+    // Fala 1 #12 — 3 skill points per level (was 2). Faster build-out
+    // through bravery/mystery/wit so the skill tree feels meaningful
+    // by level 5 instead of level 10.
+    skillPoints += 3;
     // Exponential curve: each level needs more than the previous.
     xpRequired = Math.floor(100 * Math.pow(1.2, level));
   }
@@ -1789,6 +1830,125 @@ export function GameProvider({ children }: PropsWithChildren) {
             ? { activeTab: "messages" as const, characterProfileId: null, phase: "game" as const }
             : {}),
         })),
+      toggleMuteCharacter: (id) =>
+        setState((s) => {
+          const isMuted = s.mutedCharacterIds.includes(id);
+          return {
+            ...s,
+            mutedCharacterIds: isMuted
+              ? s.mutedCharacterIds.filter((x) => x !== id)
+              : [...s.mutedCharacterIds, id],
+          };
+        }),
+      toggleFavoritePost: (postId) =>
+        setState((s) => ({
+          ...s,
+          favoritedPostIds: s.favoritedPostIds.includes(postId)
+            ? s.favoritedPostIds.filter((x) => x !== postId)
+            : [...s.favoritedPostIds, postId],
+        })),
+      toggleFavoriteReply: (replyId) =>
+        setState((s) => ({
+          ...s,
+          favoritedReplyIds: s.favoritedReplyIds.includes(replyId)
+            ? s.favoritedReplyIds.filter((x) => x !== replyId)
+            : [...s.favoritedReplyIds, replyId],
+        })),
+      reportPost: (postId) =>
+        setState((s) => {
+          // Fala 3 — deterministic harm scoring. A post is "justified to
+          // report" when it's attacker-toned (the author was already
+          // hostile to the player on this post). We probe the post's
+          // own threadReplies — if the AUTHOR has any reply tagged
+          // attack, OR the post text @mentions the player AND the
+          // author has a rivals/enemies chemistry, it's fair game.
+          const post = s.posts.find((p) => p.id === postId);
+          if (!post) return s;
+          if (s.reports.some((r) => r.postId === postId)) return s;
+          const contact = s.contacts[post.authorId];
+          const hostileChem =
+            contact?.chemistry === "rivals" || contact?.chemistry === "enemies";
+          const mentionsPlayer =
+            post.text.toLowerCase().includes("@player") ||
+            post.text
+              .toLowerCase()
+              .includes(s.player.handle.toLowerCase());
+          const justified = hostileChem && mentionsPlayer;
+          // Hostile + mentions → reputation reward (society backs you).
+          // Otherwise → reputation cost (false flag damages trust).
+          const followerDelta = justified ? 50 : -75;
+          const auraDelta = justified ? 0.5 : -0.4;
+          const newContacts: typeof s.contacts = { ...s.contacts };
+          if (contact) {
+            const vibeShift = justified ? -3 : -1;
+            newContacts[post.authorId] = {
+              ...contact,
+              vibe: clampPercent(contact.vibe + vibeShift),
+            };
+          }
+          return {
+            ...s,
+            posts: s.posts.filter((p) => p.id !== postId),
+            reports: [
+              ...s.reports,
+              {
+                postId,
+                authorId: post.authorId,
+                reportedDay: s.day,
+                justified,
+              },
+            ],
+            player: {
+              ...s.player,
+              followers: Math.max(0, s.player.followers + followerDelta),
+              socialPresence: {
+                ...s.player.socialPresence,
+                aura: clampPercent(
+                  s.player.socialPresence.aura + auraDelta * 10,
+                ),
+              },
+            },
+            contacts: newContacts,
+            lastToast: {
+              id: `t-report-${Date.now()}`,
+              headline: justified ? "Report upheld" : "Report flagged",
+              body: justified
+                ? "Community backed you. Post removed, author lost vibe."
+                : "Community thought this was uncalled for. Small reputation hit.",
+              followerDelta,
+              presenceDeltas: justified
+                ? [{ key: "aura", direction: "up" }]
+                : [{ key: "aura", direction: "down" }],
+              relationshipDeltas: contact
+                ? [
+                    {
+                      characterId: post.authorId,
+                      direction: "down",
+                    },
+                  ]
+                : [],
+            },
+          };
+        }),
+      setAutoContactConfig: (id, cfg) =>
+        setState((s) => ({
+          ...s,
+          autoContactConfig: {
+            ...s.autoContactConfig,
+            [id]: cfg,
+          },
+        })),
+      dismissWinScreen: () =>
+        setState((s) => ({
+          ...s,
+          mainGoalCompletedDay: null,
+          // Fala 3 — arming next tier. mainGoalProgress goes back to 0
+          // so the progress bar refills against the next threshold.
+          // The actual threshold (followers count) is determined by
+          // world definition + goalsCompleted multiplier downstream.
+          mainGoalProgress: 0,
+          goalsCompleted: s.goalsCompleted + 1,
+        })),
       applySkillStaging: (deltas) =>
         setState((s) => {
           const total = deltas.bravery + deltas.mystery + deltas.wit;
@@ -2440,7 +2600,52 @@ export function GameProvider({ children }: PropsWithChildren) {
           if (completed) {
             milestones = [...milestones, generateProceduralMilestone(milestones.length - 2)];
           }
-          let next = {
+          // Fala 3 — milestone event: when a milestone completes, drop
+          // a Pop Craze leak post + small follower bump. This is the
+          // "event you don't control" — fires automatically. Every
+          // 5th milestone additionally seeds an unlock-suggestion
+          // notification so the player feels the system reward them
+          // with a new contact to add.
+          let milestoneAftermathPost: typeof s.posts[number] | null = null;
+          let milestoneFollowerBump = 0;
+          let milestoneNotif: typeof s.notifications[number] | null = null;
+          if (completed) {
+            const milestoneTitleSlug = m.title;
+            const playerHandle = s.player.handle;
+            const headlines = [
+              `${playerHandle} just unlocked: ${milestoneTitleSlug}. The timeline is recalibrating.`,
+              `Sources confirm ${playerHandle} hit ${milestoneTitleSlug}. Industry takes notice.`,
+              `${milestoneTitleSlug} is OFFICIAL for ${playerHandle}. Stans are flooding the algorithm.`,
+            ];
+            milestoneAftermathPost = {
+              id: `p-milestone-${Date.now()}`,
+              authorId: "pop-craze",
+              text: headlines[Math.floor(Math.random() * headlines.length)],
+              createdAt: nowLabel(),
+              day: s.day,
+              likes: Math.floor(80_000 + Math.random() * 300_000),
+              replies: 0,
+              reposts: `${(5 + Math.random() * 40).toFixed(1)}K`,
+              views: `${(100 + Math.random() * 600).toFixed(0)}K`,
+              threadReplies: [],
+            };
+            milestoneFollowerBump = Math.floor(
+              200 + Math.random() * 600 + s.mainGoalProgress * 5,
+            );
+            // Every 5th milestone — recommend new cast member.
+            const totalCleared = milestones.filter((x) => x.completed).length;
+            if (totalCleared > 0 && totalCleared % 5 === 0) {
+              milestoneNotif = {
+                id: `n-unlock-${Date.now()}`,
+                charactersInvolved: [],
+                headline: "New connections unlocked",
+                preview: `Industry's noticing. Tap "+ Add character" in Goals to expand your cast — you've earned the next tier.`,
+                postId: undefined,
+                createdAt: nowLabel(),
+              };
+            }
+          }
+          let next: GameState = {
             ...s,
             milestones,
             skillPoints: s.skillPoints - 1,
@@ -2448,6 +2653,18 @@ export function GameProvider({ children }: PropsWithChildren) {
             mainGoalProgress: completed
               ? Math.min(100, s.mainGoalProgress + 14)
               : s.mainGoalProgress,
+            player: completed
+              ? {
+                  ...s.player,
+                  followers: s.player.followers + milestoneFollowerBump,
+                }
+              : s.player,
+            pendingBackgroundPosts: milestoneAftermathPost
+              ? [milestoneAftermathPost, ...s.pendingBackgroundPosts]
+              : s.pendingBackgroundPosts,
+            notifications: milestoneNotif
+              ? [milestoneNotif, ...s.notifications]
+              : s.notifications,
             activityLog: completed
               ? [
                   logEntry({
@@ -2464,6 +2681,7 @@ export function GameProvider({ children }: PropsWithChildren) {
           };
           if (completed) {
             next = withXP(next, m.xp);
+            next = maybeFireWinScreen(next, s.selectedWorldId);
           }
           return next;
         });
@@ -2725,7 +2943,7 @@ export function GameProvider({ children }: PropsWithChildren) {
           };
         });
       },
-      createActivity: async ({ title, description, inviteeIds, scheduledDay }) => {
+      createActivity: async ({ title, description, inviteeIds, scheduledDay, scheduledHour }) => {
         softHaptic();
         const activityId = `act-${Date.now()}`;
         const activity: ActivityInvite = {
@@ -2734,6 +2952,7 @@ export function GameProvider({ children }: PropsWithChildren) {
           description,
           inviteeIds,
           scheduledDay,
+          scheduledHour,
           createdDay: stateRef.current.day,
         };
         // Audit-fix B3 — no longer enqueue an "activity-aftermath" pending
@@ -2799,10 +3018,48 @@ export function GameProvider({ children }: PropsWithChildren) {
               mood: { label: moodInfo.label, reason: moodInfo.detail, delta },
             };
           }
+          // Fala 3 — activity aftermath. 70% chance a Pop Craze leak
+          // post drops referencing the player + invitees. Cheap fixed
+          // template — no extra AI call. Goes to pendingBackgroundPosts
+          // so it lands on the next pull-to-refresh, not magically in
+          // the visible feed.
+          const aftermathRoll = Math.random();
+          let aftermathPost: typeof s.posts[number] | null = null;
+          if (aftermathRoll < 0.7 && inviteeIds.length > 0) {
+            const partnerNames = inviteeIds
+              .slice(0, 2)
+              .map((id) => {
+                const c = allCharacters.find((x) => x.id === id);
+                return c?.handle ?? `@${id}`;
+              })
+              .join(" + ");
+            const player = ref.player;
+            const headlines = [
+              `${player.handle} spotted at ${title.toLowerCase()} with ${partnerNames} — the timeline is FED.`,
+              `Receipts: ${player.handle} and ${partnerNames} pulled up together. Why isn't anyone talking about this?`,
+              `${partnerNames} + ${player.handle} = the collab we didn't ask for and now can't unsee.`,
+              `Day ${s.day}: ${player.handle} and ${partnerNames} were seen at the same ${title.toLowerCase()}. Coincidence? You decide.`,
+            ];
+            aftermathPost = {
+              id: `p-aftermath-${Date.now()}`,
+              authorId: "pop-craze",
+              text: headlines[Math.floor(Math.random() * headlines.length)],
+              createdAt: nowLabel(),
+              day: s.day,
+              likes: Math.floor(40_000 + Math.random() * 200_000),
+              replies: 0,
+              reposts: `${(2 + Math.random() * 30).toFixed(1)}K`,
+              views: `${(50 + Math.random() * 400).toFixed(0)}K`,
+              threadReplies: [],
+            };
+          }
           return {
             ...s,
             contacts,
             activities: s.activities.map((a) => (a.id === activityId ? next : a)),
+            pendingBackgroundPosts: aftermathPost
+              ? [aftermathPost, ...s.pendingBackgroundPosts]
+              : s.pendingBackgroundPosts,
             activityLog: [
               logEntry({
                 kind: "activity-created",
@@ -3251,6 +3508,50 @@ function buildEventSummary(args: {
   return `${args.eventTitle}: player chose "${args.choice}". ${cleanOutcome}`.slice(0, 220);
 }
 
+// Fala 3 — main-goal completion helper. Called after any state mutation
+// that bumps mainGoalProgress (applyPostReplies, milestone completion,
+// completeEvent). When progress crosses 100, flips mainGoalCompletedDay
+// + populates lastWinReveal with a scenario-specific reveal (Grammy
+// winner in accidentally-famous). UI watches mainGoalCompletedDay !==
+// null to render the WinScreen modal.
+function maybeFireWinScreen(
+  state: GameState,
+  worldId: string,
+): GameState {
+  if (state.mainGoalProgress < 100) return state;
+  if (state.mainGoalCompletedDay !== null) return state; // already fired
+  // Scenario-aware winner reveal. accidentally-famous → Grammy.
+  // bridgerton → Queen's Diamond honour. magic-school → Headmaster choice.
+  // Other scenarios get a generic crowning headline.
+  const acquaintances = Object.keys(state.contacts);
+  const winner = state.player.followers > 50_000_000 || acquaintances.length === 0
+    ? "player"
+    : acquaintances[Math.floor(Math.random() * acquaintances.length)];
+  const reveal =
+    worldId === "accidentally-famous"
+      ? {
+          winnerCharacterId: winner,
+          headline:
+            winner === "player"
+              ? "GRAMMY: YOU WON BEST NEW ARTIST"
+              : "GRAMMY: BEST NEW ARTIST GOES TO…",
+          body:
+            winner === "player"
+              ? "Forty million people just watched your name on the world's biggest stage. You're not 'accidentally' anything anymore."
+              : "Your name was on the shortlist. The room held its breath. Then the envelope opened on someone else. You're still in this — there's always next year.",
+        }
+      : {
+          winnerCharacterId: winner,
+          headline: "Main goal cleared",
+          body: "You closed out the chapter you set out to write. The next one starts now.",
+        };
+  return {
+    ...state,
+    mainGoalCompletedDay: state.day,
+    lastWinReveal: reveal,
+  };
+}
+
 
 function applyPostReplies(
   s: GameState,
@@ -3518,6 +3819,9 @@ function applyPostReplies(
   if (crisisOrigin) {
     crisisBumped = applyCrisisDelta(crisisBumped, 25, crisisOrigin);
   }
+  // Fala 3 — check main-goal completion after this bump. Mutates
+  // mainGoalCompletedDay + lastWinReveal in place if crossed 100.
+  crisisBumped = maybeFireWinScreen(crisisBumped, s.selectedWorldId);
   return {
     ...crisisBumped,
     lastToast: {

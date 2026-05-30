@@ -151,7 +151,16 @@ export type PendingAction =
   | { id: string; kind: "post-replies"; payload: { postId: string; contextReplyId?: string } }
   | { id: string; kind: "event-aftermath"; payload: { eventChoice: string } }
   | { id: string; kind: "activity-aftermath"; payload: { activityId: string } }
-  | { id: string; kind: "daily-tick"; payload: Record<string, never> };
+  | { id: string; kind: "daily-tick"; payload: Record<string, never> }
+  // Fala 3 — milestone event. Triggers an AI-generated story beat when
+  // the player crosses a follower threshold. Differs from event-aftermath
+  // in that the player has NO choice — it happens TO them.
+  | { id: string; kind: "milestone-event"; payload: { milestoneId: string } }
+  // Fala 3 — proactive ping from a contact configured via auto-DM
+  // scheduler. The bg tick enqueues these once per day per active
+  // contact, depending on intensity.
+  | { id: string; kind: "proactive-dm"; payload: { characterId: string } }
+  | { id: string; kind: "proactive-invite"; payload: { characterId: string } };
 
 export type ChatMessage = {
   id: string;
@@ -250,6 +259,10 @@ export type ActivityInvite = {
   description: string;
   inviteeIds: string[];
   scheduledDay: number;
+  // Fala 2 — clock-time the activity is scheduled for (0-23, 24-hour).
+  // Drives the AI outcome tone (late night = intimate/risky, morning =
+  // professional). Optional so legacy saves stay valid.
+  scheduledHour?: number;
   createdDay: number;
   outcome?: string;
   responses?: Array<{ characterId: string; accepted: boolean; message: string }>;
@@ -476,4 +489,50 @@ export type GameState = {
   // FeedHeader so the player knows whether the world is "breathing"
   // live AI right now or coasting on fallback content.
   aiOnline: boolean;
+
+  // ===== Fala 1 #5 — Character notification mute =====
+  mutedCharacterIds: string[];
+
+  // ===== Fala 2 — Favorites =====
+  // IDs the player tapped the star on. Surfaced in ProfileScreen
+  // "Favorites" section so they can revisit memorable posts/comments.
+  favoritedPostIds: string[];
+  favoritedReplyIds: string[];
+
+  // ===== Fala 3 — Reports =====
+  // IDs of posts the player reported. Filtered out of the feed.
+  // Each entry records whether the report was JUSTIFIED (post had
+  // attacker-tone targeting the player) — drives reputation effects.
+  reports: Array<{
+    postId: string;
+    authorId: string;
+    reportedDay: number;
+    justified: boolean;
+  }>;
+
+  // ===== Fala 3 — Main goal cycling =====
+  // Day the current main goal was completed. null while in progress.
+  // When set, the WinScreen modal opens; on dismiss the next goal
+  // tier arms (e.g. 100k → 500k → 1M followers).
+  mainGoalCompletedDay: number | null;
+  // How many main goals the player has finished this scenario run.
+  // Drives win-screen copy ("Goal 1 of ∞ cleared", new threshold).
+  goalsCompleted: number;
+  // Most recent Grammy winner reveal — null until a goal completes in
+  // the accidentally-famous scenario. Persisted so the modal can be
+  // reopened.
+  lastWinReveal: {
+    winnerCharacterId: string;
+    headline: string;
+    body: string;
+  } | null;
+
+  // ===== Fala 3 — Auto-DM / auto-invite scheduler =====
+  // Map characterId → { dmIntensity 0-4, inviteIntensity 0-4 }.
+  // 0 = off, 1-4 = approximate daily probability ladder
+  // (5%, 15%, 35%, 60%). Bg tick rolls dice once per day per entry.
+  autoContactConfig: Record<
+    string,
+    { dmIntensity: number; inviteIntensity: number }
+  >;
 };

@@ -45,7 +45,7 @@ npx tsc --noEmit   # must EXIT=0
 - Variable XP per action. Replies = 4 XP. Side quests = 30-50 XP.
   Events scale with player level: floor 15+6·lvl, ceiling 25+10·lvl.
 - Level-up curve is exponential: `xpRequired = floor(100 * 1.2^level)`.
-- Each level grants 2 skill points (bravery / mystery / wit) the player
+- Each level grants 3 skill points (bravery / mystery / wit) the player
   applies through the Goals tab.
 
 ### Crisis (Stan Wars)

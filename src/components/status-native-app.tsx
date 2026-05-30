@@ -2,6 +2,7 @@ import { Image } from "expo-image";
 import {
   ArrowLeft,
   Bell,
+  BellOff,
   BookOpen,
   ChevronDown,
   ChevronRight,
@@ -42,6 +43,7 @@ import {
   Animated,
   AppState,
   FlatList,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -803,6 +805,9 @@ function GameShell() {
       {/* Round 1.11.32 Faza D — PR Actions modal mounted at shell level
           so any screen can open it (CrisisBar tap, future toast CTAs). */}
       <PRActionsModal />
+      {/* Fala 3 — main-goal win screen. Auto-triggers when
+          mainGoalCompletedDay flips from null to a day number. */}
+      <WinScreenModal />
       {/* F1 — first-run tutorial overlay. Self-gates on onboardingSeen. */}
       <OnboardingOverlay />
     </View>
@@ -892,8 +897,11 @@ function FeedHeader() {
           <BookOpen color={colors.muted2} size={18} />
         </IconButton>
         <View style={{ width: 8 }} />
+        {/* Fala 1 #10 — replaced Store (marketplace placeholder, never
+            wired) with Settings cog. The icon now matches the action
+            it performs. */}
         <IconButton size={36} onPress={() => setAppSettingsOpen(true)}>
-          <Store color={colors.muted2} size={18} />
+          <Settings color={colors.muted2} size={18} />
         </IconButton>
       </View>
       {/* Round 1.11.32 Faza D — CrisisBar slides in below the Day chip
@@ -948,7 +956,43 @@ function NetworkStatusChip({ online }: { online: boolean }) {
 // pill is the press target.
 function CrisisBar() {
   const { state, setPRActionsOpen } = useGame();
-  if (state.crisisLevel <= 0) return null;
+  // Fala 3 — calm-state render when crisisLevel <= 0. Previously
+  // returned null so the system was completely invisible until the
+  // player triggered a -50 vibe drop. New behaviour: always show a
+  // subtle status pill so the player knows the system EXISTS and can
+  // explore PR Actions even without an active fire.
+  if (state.crisisLevel <= 0) {
+    return (
+      <Pressable
+        onPress={() => {
+          void Haptics.selectionAsync().catch(() => undefined);
+          setPRActionsOpen(true);
+        }}
+        style={({ pressed }) => ({
+          marginTop: 10,
+          paddingHorizontal: 12,
+          paddingVertical: 7,
+          borderRadius: 12,
+          backgroundColor: colors.surface,
+          borderWidth: 1,
+          borderColor: colors.divider,
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 8,
+          opacity: pressed ? 0.85 : 1,
+        })}
+      >
+        <AppText size={13}>🟢</AppText>
+        <AppText size={12} weight="800" color={colors.muted}>
+          Vibe: clear (0/100)
+        </AppText>
+        <View style={{ flex: 1 }} />
+        <AppText size={11} color={colors.muted2}>
+          PR Actions →
+        </AppText>
+      </Pressable>
+    );
+  }
   const blackout = state.crisisLevel >= 100;
   const critical = state.crisisLevel >= 70;
   const layingLow = state.crisisLayingLow;
@@ -1208,7 +1252,17 @@ const FeedPostItem = React.memo(function FeedPostItem({
   showDivider?: boolean;
   noTap?: boolean;
 }) {
-  const { state, likePost, starPost, repostPost, openCharacterProfile, openPost, resolveCharacter } = useGame();
+  const {
+    state,
+    likePost,
+    starPost,
+    repostPost,
+    openCharacterProfile,
+    openPost,
+    resolveCharacter,
+    reportPost,
+    toggleFavoritePost,
+  } = useGame();
   // Round 1.11.32 G-Fix #8 — pop scale animation on like/repost taps.
   // Twitter/X-style "thump" that gives the action visible weight. The
   // animation sequence runs in parallel with the state mutation so the
@@ -1267,7 +1321,44 @@ const FeedPostItem = React.memo(function FeedPostItem({
               {author.handle}
             </AppText>
             <View style={{ flex: 1 }} />
-            <Ellipsis color={colors.muted2} size={18} />
+            {/* Fala 3 — 3-dots menu: Report or Favorite. Report sheet
+                determines justification deterministically based on
+                author chemistry + whether the post @-mentions the
+                player; reward or penalty applied via reducer. */}
+            <Pressable
+              hitSlop={8}
+              onPress={() => {
+                if (post.authorId === "player") return;
+                const isFav = state.favoritedPostIds.includes(post.id);
+                Alert.alert("Post options", "What would you like to do?", [
+                  {
+                    text: isFav ? "Unfavorite" : "Favorite",
+                    onPress: () => toggleFavoritePost(post.id),
+                  },
+                  {
+                    text: "Report post",
+                    style: "destructive",
+                    onPress: () => {
+                      Alert.alert(
+                        "Report this post?",
+                        "If the community sees it as genuinely hostile, you'll be backed. If not, your reputation takes a small hit.",
+                        [
+                          { text: "Cancel", style: "cancel" },
+                          {
+                            text: "Report",
+                            style: "destructive",
+                            onPress: () => reportPost(post.id),
+                          },
+                        ],
+                      );
+                    },
+                  },
+                  { text: "Cancel", style: "cancel" },
+                ]);
+              }}
+            >
+              <Ellipsis color={colors.muted2} size={18} />
+            </Pressable>
           </View>
           <AppText size={15} selectable>
             {renderMentions(post.text.replace("@player", state.player.handle))}
@@ -1856,24 +1947,16 @@ function GoalsHeader() {
         <AppText size={13} weight="900" color={colors.amber}>
           {state.xp}/{state.xpRequired} XP
         </AppText>
-        <View
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: 14,
-            backgroundColor: colors.orange,
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <Plus color={colors.text} size={16} />
-        </View>
+        {/* Fala 1 #15 — dead orange + plus removed. It was a static
+            decoration with no onPress so it confused players who
+            assumed it bought XP or upgraded the level. */}
         <EnergyBadge />
         <IconButton size={32} onPress={() => setActivityLogOpen(true)}>
           <BookOpen color={colors.muted2} size={16} />
         </IconButton>
+        {/* Fala 1 #10 — matching FeedHeader: cog icon for settings. */}
         <IconButton size={32} onPress={() => setAppSettingsOpen(true)}>
-          <Store color={colors.muted2} size={16} />
+          <Settings color={colors.muted2} size={16} />
         </IconButton>
       </View>
       <View style={{ flexDirection: "row", alignItems: "center", marginTop: 8 }}>
@@ -2096,9 +2179,30 @@ function GoalsScreen() {
         <View style={{ flexDirection: "row", alignItems: "center" }}>
           <SectionTitle title="Skills" />
           <View style={{ flex: 1 }} />
-          <AppText size={14} color={colors.orange} weight="900">
-            ⚔ {remaining} / {state.skillPoints} Points
-          </AppText>
+          {/* Fala 1 #13 — promoted from a thin orange line to a real
+              pill so the available-points count is impossible to miss.
+              Greys out when zero so the player sees "level up to earn
+              more" rather than "system is broken". */}
+          <View
+            style={{
+              backgroundColor:
+                state.skillPoints > 0 ? colors.orange : colors.surfaceSoft,
+              paddingHorizontal: 12,
+              paddingVertical: 6,
+              borderRadius: radii.pill,
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 4,
+            }}
+          >
+            <AppText
+              size={13}
+              weight="900"
+              color={state.skillPoints > 0 ? colors.text : colors.muted}
+            >
+              ⚔ {remaining}/{state.skillPoints} pts
+            </AppText>
+          </View>
         </View>
         <Card style={{ gap: 14 }}>
           {(["bravery", "mystery", "wit"] as SkillKey[]).map((skill, index) => {
@@ -2254,6 +2358,41 @@ function GoalsScreen() {
 //  MESSAGES
 // ===================================================================
 
+// Fala 3 — small ladder picker for 0-4 intensity. Used inside the
+// auto-contact scheduler modal.
+function IntensityPicker({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+      <AppText size={11} color={colors.muted2}>
+        {label}
+      </AppText>
+      {[0, 1, 2, 3, 4].map((step) => (
+        <Pressable
+          key={step}
+          onPress={() => onChange(step)}
+          hitSlop={4}
+          style={{
+            width: 16,
+            height: 16,
+            borderRadius: 8,
+            backgroundColor: step <= value ? colors.purple : colors.surfaceSoft,
+            borderWidth: 1,
+            borderColor: step <= value ? colors.purple : colors.divider,
+          }}
+        />
+      ))}
+    </View>
+  );
+}
+
 function MessagesScreen() {
   const { state, setActiveChatId } = useGame();
   if (state.activeChatId) {
@@ -2268,7 +2407,11 @@ function MessagesScreen() {
 }
 
 function InboxScreen({ onOpenChat }: { onOpenChat: (id: string) => void }) {
-  const { state, cast, setAddCharacterOpen } = useGame();
+  const { state, cast, setAddCharacterOpen, setAutoContactConfig } = useGame();
+  // Fala 3 — auto-contact scheduler modal. Lists each cast member with
+  // two ladders (DM intensity 0-4 / invite intensity 0-4). Stored
+  // values drive the daily roll in the bg tick.
+  const [autoConfigOpen, setAutoConfigOpen] = useState(false);
   const proactiveContacts = cast
     .filter((c) => state.contacts[c.id]?.proactive)
     .map((c) => ({ char: c, contact: state.contacts[c.id] }));
@@ -2298,20 +2441,118 @@ function InboxScreen({ onOpenChat }: { onOpenChat: (id: string) => void }) {
         >
           <Plus color={colors.text} size={18} />
         </Pressable>
-        <View
-          style={{
+        <Pressable
+          onPress={() => {
+            void Haptics.selectionAsync().catch(() => undefined);
+            setAutoConfigOpen(true);
+          }}
+          style={({ pressed }) => ({
             width: 38,
             height: 38,
             borderRadius: 19,
             backgroundColor: colors.purple,
             alignItems: "center",
             justifyContent: "center",
-          }}
+            opacity: pressed ? 0.85 : 1,
+          })}
         >
           <MailPlus color={colors.text} size={20} />
-        </View>
+        </Pressable>
       </View>
       <Divider inset={18} />
+      {/* Fala 3 — auto-contact scheduler. Each cast member gets two
+          intensity ladders (0-4). Bg tick uses these to roll daily
+          proactive DM / activity-invite chances. */}
+      <Modal
+        visible={autoConfigOpen}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setAutoConfigOpen(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" }}>
+          <View
+            style={{
+              backgroundColor: colors.bg,
+              borderTopLeftRadius: 24,
+              borderTopRightRadius: 24,
+              paddingHorizontal: 18,
+              paddingTop: 18,
+              paddingBottom: 28,
+              maxHeight: "85%",
+            }}
+          >
+            <View style={{ flexDirection: "row", alignItems: "center", marginBottom: 10 }}>
+              <AppText size={18} weight="900">
+                Auto-DMs & invites
+              </AppText>
+              <View style={{ flex: 1 }} />
+              <Pressable onPress={() => setAutoConfigOpen(false)} hitSlop={8}>
+                <X color={colors.muted2} size={20} />
+              </Pressable>
+            </View>
+            <AppText size={12} color={colors.muted2} style={{ marginBottom: 14 }}>
+              Pick how often each contact messages or invites you. 0 = silent,
+              4 = constantly checking in.
+            </AppText>
+            <ScrollView style={{ maxHeight: 480 }}>
+              {cast.length === 0 ? (
+                <AppText size={13} color={colors.muted}>
+                  Add some characters first (+ button above).
+                </AppText>
+              ) : (
+                cast.map((c) => {
+                  const cfg = state.autoContactConfig[c.id] ?? {
+                    dmIntensity: 0,
+                    inviteIntensity: 0,
+                  };
+                  return (
+                    <View
+                      key={c.id}
+                      style={{
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 10,
+                        paddingVertical: 10,
+                        borderBottomColor: colors.divider,
+                        borderBottomWidth: 1,
+                      }}
+                    >
+                      <Avatar uri={c.avatar} size={36} />
+                      <View style={{ flex: 1, gap: 4 }}>
+                        <AppText size={13} weight="800" numberOfLines={1}>
+                          {c.name}
+                        </AppText>
+                        <View style={{ flexDirection: "row", gap: 12 }}>
+                          <IntensityPicker
+                            label="DM"
+                            value={cfg.dmIntensity}
+                            onChange={(v) =>
+                              setAutoContactConfig(c.id, {
+                                ...cfg,
+                                dmIntensity: v,
+                              })
+                            }
+                          />
+                          <IntensityPicker
+                            label="Invite"
+                            value={cfg.inviteIntensity}
+                            onChange={(v) =>
+                              setAutoContactConfig(c.id, {
+                                ...cfg,
+                                inviteIntensity: v,
+                              })
+                            }
+                          />
+                        </View>
+                      </View>
+                    </View>
+                  );
+                })
+              )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {cast.length === 0 ? (
         <Card style={{ gap: 10, alignItems: "center" }}>
@@ -2711,7 +2952,18 @@ function AlertsScreen() {
           </AppText>
         </Card>
       ) : (
-        state.notifications.map((item) => {
+        state.notifications
+          .filter(
+            // Fala 1 #5 — drop notifications whose involved characters
+            // are ALL muted. Mixed (some muted, some not) still shows
+            // — the unmuted character is the reason this notif matters.
+            (item) =>
+              item.charactersInvolved.length === 0 ||
+              item.charactersInvolved.some(
+                (id) => !state.mutedCharacterIds.includes(id),
+              ),
+          )
+          .map((item) => {
           const involved = item.charactersInvolved
             .map((id) => resolveCharacter(id))
             .filter(Boolean) as Array<{ avatar: AvatarSource; name: string }>;
@@ -2831,7 +3083,7 @@ function ProfileScreen() {
     setCreateActivityOpen,
     openCharacterProfile,
     resolveCharacter,
-    setActiveTab,
+    openPost,
   } = useGame();
   const insets = useSafeAreaInsets();
 
@@ -2856,8 +3108,16 @@ function ProfileScreen() {
             gap: 8,
           }}
         >
-          <IconButton size={36} color="rgba(0,0,0,0.55)" onPress={() => setAppSettingsOpen(true)}>
-            <Store color={colors.muted2} size={18} />
+          {/* Fala 1 #6 — left button = Activity Log shortcut. Was a
+              duplicate Settings before, which made it useless. The log
+              is the most-requested deep-link from Profile (review what
+              happened across recent days). */}
+          <IconButton
+            size={36}
+            color="rgba(0,0,0,0.55)"
+            onPress={() => setActivityLogOpen(true)}
+          >
+            <BookOpen color={colors.muted2} size={18} />
           </IconButton>
           <IconButton size={36} color="rgba(0,0,0,0.55)" onPress={() => setAppSettingsOpen(true)}>
             <Settings color={colors.muted2} size={18} />
@@ -2895,44 +3155,9 @@ function ProfileScreen() {
           </AppText>
         </AppText>
 
-        {/* Round 1.11.32 G-Fix #6 — Milestones counter on Profile. The
-            full milestones grid stays in the Goals tab; this strip just
-            broadcasts how many the player has cleared so the system
-            stays visible from anywhere. Tap the strip to jump straight
-            to the Goals tab and see the rail. */}
-        {(() => {
-          const total = state.milestones.length;
-          const cleared = state.milestones.filter((m) => m.completed).length;
-          const skipped = state.milestones.filter((m) => m.skipped).length;
-          return (
-            <Pressable
-              onPress={() => setActiveTab("goals")}
-              style={{
-                marginTop: 12,
-                paddingHorizontal: 14,
-                paddingVertical: 12,
-                borderRadius: radii.md,
-                backgroundColor: colors.surface,
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 10,
-              }}
-            >
-              <Trophy color={colors.amber} size={18} />
-              <View style={{ flex: 1 }}>
-                <AppText size={13} weight="900">
-                  Milestones {cleared} / {total}
-                </AppText>
-                <AppText size={11} color={colors.muted2}>
-                  {skipped > 0 ? `${skipped} skipped · ` : ""}Tap to open the rail
-                </AppText>
-              </View>
-              <AppText size={14} color={colors.muted2}>
-                →
-              </AppText>
-            </Pressable>
-          );
-        })()}
+        {/* Fala 1 #16 — milestones strip removed. Goals tab is the
+            single source of truth for milestones; mirroring the count
+            here added clutter without information. */}
 
         <View style={{ gap: 10, marginTop: 14 }}>
           <Pressable
@@ -2970,6 +3195,52 @@ function ProfileScreen() {
             </AppText>
           </Pressable>
         </View>
+
+        {/* Fala 2 — Favorites section. Renders compact rows of the
+            posts + replies the player starred. Tapping a row opens
+            that post in PostDetailModal. */}
+        {state.favoritedPostIds.length + state.favoritedReplyIds.length > 0 ? (
+          <>
+            <AppText size={18} weight="900" style={{ marginTop: 22, marginBottom: 10 }}>
+              Favorites
+            </AppText>
+            <Card style={{ gap: 10 }}>
+              {state.favoritedPostIds.slice(0, 6).map((pid) => {
+                const fp = state.posts.find((p) => p.id === pid);
+                if (!fp) return null;
+                const fa =
+                  fp.authorId === "player"
+                    ? { name: state.player.name, handle: state.player.handle, avatar: state.player.avatar }
+                    : resolveCharacter(fp.authorId);
+                if (!fa) return null;
+                return (
+                  <Pressable
+                    key={pid}
+                    onPress={() => openPost(pid)}
+                    style={{ flexDirection: "row", gap: 10, alignItems: "flex-start" }}
+                  >
+                    <Avatar uri={fa.avatar} size={28} />
+                    <View style={{ flex: 1 }}>
+                      <AppText size={12} weight="900" numberOfLines={1}>
+                        {fa.name}
+                      </AppText>
+                      <AppText size={12} color={colors.muted2} numberOfLines={2}>
+                        {fp.text}
+                      </AppText>
+                    </View>
+                    <Star color={colors.amber} fill={colors.amber} size={14} />
+                  </Pressable>
+                );
+              })}
+              {state.favoritedReplyIds.length > 0 ? (
+                <AppText size={11} color={colors.muted2} style={{ marginTop: 4 }}>
+                  + {state.favoritedReplyIds.length} starred reply
+                  {state.favoritedReplyIds.length === 1 ? "" : "s"}
+                </AppText>
+              ) : null}
+            </Card>
+          </>
+        ) : null}
 
         <AppText size={18} weight="900" style={{ marginTop: 22, marginBottom: 10 }}>
           Social Media Presence
@@ -3221,6 +3492,7 @@ function CharacterProfileModal() {
     resolveCharacter,
     setEditingCharacterId,
     setActiveChatId,
+    toggleMuteCharacter,
   } = useGame();
   const id = state.characterProfileId;
   const character = id ? resolveCharacter(id) : undefined;
@@ -3255,11 +3527,48 @@ function CharacterProfileModal() {
                 <ArrowLeft color={colors.text} size={18} />
               </IconButton>
               <View style={{ flex: 1 }} />
-              <IconButton size={34} color="rgba(0,0,0,0.55)">
-                <Store color={colors.text} size={16} />
+              {/* Fala 1 #5 — left button = mute notifs toggle. Bell when
+                  active, BellOff when muted. Tapping flips the state. */}
+              <IconButton
+                size={34}
+                color="rgba(0,0,0,0.55)"
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  toggleMuteCharacter(id);
+                }}
+              >
+                {state.mutedCharacterIds.includes(id) ? (
+                  <BellOff color={colors.muted} size={16} />
+                ) : (
+                  <Bell color={colors.text} size={16} />
+                )}
               </IconButton>
               <View style={{ width: 8 }} />
-              <IconButton size={34} color="rgba(0,0,0,0.55)">
+              {/* Fala 1 #5 — right button = settings sheet. Single
+                  visible action right now (Mute toggle) so the player
+                  has TWO entry points to the same control — bell is
+                  the quick toggle, settings is the discoverable menu.
+                  Future expansion: Block, Remove from cast, Report. */}
+              <IconButton
+                size={34}
+                color="rgba(0,0,0,0.55)"
+                onPress={() => {
+                  const muted = state.mutedCharacterIds.includes(id);
+                  Alert.alert(
+                    character.name,
+                    `What would you like to do with @${character.handle.replace(/^@/, "")}?`,
+                    [
+                      {
+                        text: muted
+                          ? "Unmute notifications"
+                          : "Mute notifications",
+                        onPress: () => toggleMuteCharacter(id),
+                      },
+                      { text: "Cancel", style: "cancel" },
+                    ],
+                  );
+                }}
+              >
                 <Settings color={colors.text} size={16} />
               </IconButton>
             </View>
@@ -4513,16 +4822,49 @@ function PostDetailModal() {
     openCharacterProfile,
     resolveCharacter,
     refreshFeed,
+    toggleFavoriteReply,
+    toggleFavoritePost,
+    reportPost,
   } = useGame();
   const insets = useSafeAreaInsets();
   const post = state.posts.find((p) => p.id === state.openPostId);
   const [reply, setReply] = useState("");
   const [sending, setSending] = useState(false);
+  // Fala 1 #1 — activeReplyId is now the ONLY sub-reply state. When
+  // non-null, the bottom composer shows "Replying to @handle" context
+  // and submits to replyToThreadReply instead of replyToPost. The
+  // separate subReplyText buffer is gone — the unified `reply` state
+  // covers both cases.
   const [activeReplyId, setActiveReplyId] = useState<string | null>(null);
-  const [subReplyText, setSubReplyText] = useState("");
   // Round 1.11.32 Faza F Fix #1 — ref so the top "Reply" action pill can
   // focus the bottom composer (same behavior as tapping the input).
   const replyInputRef = useRef<TextInput | null>(null);
+  // Faza K #2 — composer is HIDDEN by default. Opens only when the
+  // player taps the top "Reply" pill. Reduces visual noise on a fresh
+  // open (screenshot IMG_5413: previously two reply inputs sat on
+  // screen at once, the always-on bottom composer competing with an
+  // inline sub-reply input). Closes on backdrop tap or after a
+  // successful send.
+  const [composerOpen, setComposerOpen] = useState(false);
+  // Fala 2 — pop animations matching FeedPostItem. Heart for the
+  // post-level like + repost zap. Replies use a shared scale ref via
+  // a small subcomponent so each reply gets its own bounce.
+  const headerHeartScale = useRef(new Animated.Value(1)).current;
+  const headerZapScale = useRef(new Animated.Value(1)).current;
+  const popIcon = (val: Animated.Value) => {
+    Animated.sequence([
+      Animated.timing(val, { toValue: 1.4, duration: 110, useNativeDriver: true }),
+      Animated.spring(val, { toValue: 1, useNativeDriver: true, damping: 8, stiffness: 200 }),
+    ]).start();
+  };
+  // Reset composer state whenever the modal swaps to a different post
+  // (or closes entirely). Without this, opening Post B after replying
+  // in Post A would inherit the open-state and leftover draft.
+  useEffect(() => {
+    setComposerOpen(false);
+    setReply("");
+    setActiveReplyId(null);
+  }, [state.openPostId]);
   // Round 1.11.5 — local refreshing flag drives RefreshControl spinner on the
   // post detail ScrollView. Pulling down inside an open post fires
   // refreshFeed(), which consumes the next pending action — if the player
@@ -4557,23 +4899,23 @@ function PostDetailModal() {
   async function send() {
     const t = reply.trim();
     if (!t || sending) return;
+    const targetReplyId = activeReplyId; // capture before reset
     setReply("");
     setSending(true);
     try {
-      await replyToPost(post!.id, t);
-    } finally {
-      setSending(false);
-    }
-  }
-
-  async function sendSubReply(parentReplyId: string) {
-    const t = subReplyText.trim();
-    if (!t || sending) return;
-    setSubReplyText("");
-    setActiveReplyId(null);
-    setSending(true);
-    try {
-      await replyToThreadReply(post!.id, parentReplyId, t);
+      // Fala 1 #1 — branch on activeReplyId. Null = top-level reply
+      // to the post; non-null = sub-reply to that specific comment.
+      // Both flows share the same composer + state machinery.
+      if (targetReplyId) {
+        await replyToThreadReply(post!.id, targetReplyId, t);
+      } else {
+        await replyToPost(post!.id, t);
+      }
+      // Faza K #2 — auto-close composer after a successful send so the
+      // player goes straight back to reading the thread.
+      setComposerOpen(false);
+      setActiveReplyId(null);
+      Keyboard.dismiss();
     } finally {
       setSending(false);
     }
@@ -4665,7 +5007,16 @@ function PostDetailModal() {
                   blue prefix we open the parent profile; taps on the
                   body text fall through harmlessly (Pressable is
                   position: relative inside flowing text). */}
-              {parentTag ? (
+              {parentTag &&
+              // Faza K #1 defensive guard — legacy replies saved before
+              // we killed the setSubReplyText prefill may already have
+              // "@parent_handle" baked into the body text. Skip the
+              // blue tag prefix in that case so we don't render
+              // "@billieeilish @billieeilish craaazy" twice on old saves.
+              !r.text
+                .trim()
+                .toLowerCase()
+                .startsWith(parentTag.handle.toLowerCase()) ? (
                 <AppText size={14}>
                   <AppText
                     size={14}
@@ -4697,19 +5048,21 @@ function PostDetailModal() {
               </Pressable>
               <Pressable
                 onPress={() => {
+                  // Fala 1 #1 — unified composer. Tapping Reply on any
+                  // comment opens the SAME bottom composer used for
+                  // top-level replies, with a context bar showing
+                  // "Replying to @handle" and a cancel button to drop
+                  // back to top-level scope. No more inline form
+                  // disappearing under the keyboard at the bottom of
+                  // the thread.
                   if (isOpen) {
                     setActiveReplyId(null);
-                    setSubReplyText("");
+                    setComposerOpen(false);
+                    Keyboard.dismiss();
                   } else {
                     setActiveReplyId(r.id);
-                    // Auto-tag the comment author with @handle so the sub-reply
-                    // reads like a real X conversation thread. We skip this
-                    // when replying to your OWN comment — no @self-tag.
-                    const prefill =
-                      r.authorId !== "player" && rAuthor.handle
-                        ? `${rAuthor.handle} `
-                        : "";
-                    setSubReplyText(prefill);
+                    setComposerOpen(true);
+                    setTimeout(() => replyInputRef.current?.focus(), 50);
                   }
                 }}
               >
@@ -4718,73 +5071,34 @@ function PostDetailModal() {
                 </AppText>
               </Pressable>
               <View style={{ flex: 1 }} />
-              <Star color={colors.muted} size={14} />
-            </View>
-            {isOpen ? (
-              <View
-                style={{
-                  marginTop: 6,
-                  backgroundColor: colors.surface,
-                  borderRadius: radii.md,
-                  padding: 8,
-                  gap: 6,
+              {/* Fala 2 — favorite star is now interactive. Filled
+                  yellow when this reply is in favoritedReplyIds. */}
+              <Pressable
+                onPress={() => {
+                  void Haptics.selectionAsync().catch(() => undefined);
+                  toggleFavoriteReply(r.id);
                 }}
+                hitSlop={6}
               >
-                <TextInput
-                  value={subReplyText}
-                  onChangeText={setSubReplyText}
-                  placeholder={`Reply to ${rAuthor.handle}`}
-                  placeholderTextColor={colors.muted}
-                  multiline
-                  // Faza I #5B — sub-reply matches Twitter reply length.
-                  maxLength={280}
-                  style={{
-                    color: colors.text,
-                    fontSize: 14,
-                    minHeight: 36,
-                    maxHeight: 90,
-                    textAlignVertical: "top",
-                  }}
+                <Star
+                  color={
+                    state.favoritedReplyIds.includes(r.id)
+                      ? colors.amber
+                      : colors.muted
+                  }
+                  fill={
+                    state.favoritedReplyIds.includes(r.id)
+                      ? colors.amber
+                      : "transparent"
+                  }
+                  size={14}
                 />
-                <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 8 }}>
-                  <Pressable
-                    onPress={() => {
-                      setActiveReplyId(null);
-                      setSubReplyText("");
-                    }}
-                  >
-                    <AppText size={12} color={colors.muted2}>
-                      Cancel
-                    </AppText>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => sendSubReply(r.id)}
-                    disabled={!subReplyText.trim() || sending || state.isGenerating}
-                    style={{
-                      backgroundColor:
-                        subReplyText.trim() && !sending && !state.isGenerating
-                          ? colors.blue
-                          : colors.surfaceSoft,
-                      paddingHorizontal: 14,
-                      paddingVertical: 6,
-                      borderRadius: radii.pill,
-                    }}
-                  >
-                    <AppText
-                      size={12}
-                      weight="800"
-                      color={
-                        subReplyText.trim() && !sending && !state.isGenerating
-                          ? colors.text
-                          : colors.muted
-                      }
-                    >
-                      Post
-                    </AppText>
-                  </Pressable>
-                </View>
-              </View>
-            ) : null}
+              </Pressable>
+            </View>
+            {/* Fala 1 #1 — inline sub-reply form removed. The bottom
+                composer handles every reply, top-level or threaded,
+                with a "Replying to @handle" context bar when scoped
+                to a comment. */}
           </View>
         </View>
       </View>
@@ -4822,7 +5136,13 @@ function PostDetailModal() {
 
         <ScrollView
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={{ paddingBottom: 180 }}
+          // Faza K #2 — paddingBottom adapts to composer visibility:
+          // when closed the scroll content can run all the way to the
+          // safe-area edge; when open we leave headroom equal to the
+          // composer height so the last reply stays tappable above it.
+          contentContainerStyle={{
+            paddingBottom: composerOpen ? 200 : insets.bottom + 24,
+          }}
           refreshControl={
             <RefreshControl
               refreshing={refreshingPost}
@@ -4893,10 +5213,17 @@ function PostDetailModal() {
           >
             {/* Reply pill — primary action, keeps blue fill.
                 Round 1.11.32 Faza F Fix #1 — now a Pressable that focuses
-                the bottom composer. Same effect as tapping the input
-                directly, but the pill is the natural primary CTA. */}
+                the bottom composer.
+                Faza K #2 — additionally toggles composerOpen. The
+                composer is hidden by default; this pill is the ONLY
+                entry point for top-level replies. We delay focus()
+                one tick so the TextInput is mounted by the time
+                React Native tries to bring it up. */}
             <Pressable
-              onPress={() => replyInputRef.current?.focus()}
+              onPress={() => {
+                setComposerOpen(true);
+                setTimeout(() => replyInputRef.current?.focus(), 50);
+              }}
               style={({ pressed }) => ({
                 flexDirection: "row",
                 alignItems: "center",
@@ -4914,9 +5241,13 @@ function PostDetailModal() {
                 Reply
               </AppText>
             </Pressable>
-            {/* Repost — same pill shape & height as Reply so they sit on one perfectly aligned row */}
+            {/* Repost — same pill shape & height as Reply so they sit on one perfectly aligned row.
+                Fala 2 — Animated.View wrapper for pop on tap. */}
             <Pressable
-              onPress={() => repostPost(post.id)}
+              onPress={() => {
+                popIcon(headerZapScale);
+                repostPost(post.id);
+              }}
               style={{
                 flexDirection: "row",
                 alignItems: "center",
@@ -4928,18 +5259,23 @@ function PostDetailModal() {
                 borderRadius: radii.pill,
               }}
             >
-              <Zap
-                color={post.reposted ? colors.green : colors.muted2}
-                fill={post.reposted ? colors.green : "transparent"}
-                size={14}
-              />
+              <Animated.View style={{ transform: [{ scale: headerZapScale }] }}>
+                <Zap
+                  color={post.reposted ? colors.green : colors.muted2}
+                  fill={post.reposted ? colors.green : "transparent"}
+                  size={14}
+                />
+              </Animated.View>
               <AppText size={13} color={post.reposted ? colors.green : colors.muted}>
                 {post.reposts}
               </AppText>
             </Pressable>
-            {/* Like — same pill shape & height */}
+            {/* Like — same pill shape & height. Fala 2 — Animated.View pop. */}
             <Pressable
-              onPress={() => likePost(post.id)}
+              onPress={() => {
+                popIcon(headerHeartScale);
+                likePost(post.id);
+              }}
               style={{
                 flexDirection: "row",
                 alignItems: "center",
@@ -4951,11 +5287,13 @@ function PostDetailModal() {
                 borderRadius: radii.pill,
               }}
             >
-              <Heart
-                color={post.liked ? colors.pink : colors.muted2}
-                fill={post.liked ? colors.pink : "transparent"}
-                size={14}
-              />
+              <Animated.View style={{ transform: [{ scale: headerHeartScale }] }}>
+                <Heart
+                  color={post.liked ? colors.pink : colors.muted2}
+                  fill={post.liked ? colors.pink : "transparent"}
+                  size={14}
+                />
+              </Animated.View>
               <AppText size={13} color={post.liked ? colors.pink : colors.muted}>
                 {formatCount(post.likes)}
               </AppText>
@@ -4994,6 +5332,30 @@ function PostDetailModal() {
           )}
         </ScrollView>
 
+        {/* Faza K #2 — backdrop dim layer sits between the post body and
+            the composer. Tapping it dismisses both the keyboard and
+            the composer itself, so the player can quickly bail without
+            reaching for the corner Back arrow. Pointer-events are
+            "auto" so the touch is captured; the composer above it has
+            a higher z-order via React Native's last-rendered-is-on-top
+            rule. */}
+        {composerOpen && (
+          <Pressable
+            onPress={() => {
+              Keyboard.dismiss();
+              setComposerOpen(false);
+            }}
+            style={{
+              position: "absolute",
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: "rgba(0,0,0,0.45)",
+            }}
+          />
+        )}
+        {composerOpen && (
         <KeyboardAvoidingView
           // Faza I #2 — Platform-conditional, mirrors ChatRoom logic.
           // Android's adjustResize already resizes the window; layering
@@ -5008,7 +5370,11 @@ function PostDetailModal() {
             bottom: 0,
             paddingHorizontal: 14,
             paddingTop: 14,
-            paddingBottom: insets.bottom + 60,
+            // Faza K #3 — insets.bottom guarantees the composer never
+            // slips under the home indicator on devices with safe area.
+            // We add a small +12 cushion so the Post button isn't
+            // flush against the bottom edge.
+            paddingBottom: insets.bottom + 12,
             backgroundColor: colors.surfaceDeep,
             borderTopColor: colors.divider,
             borderTopWidth: 1,
@@ -5026,11 +5392,64 @@ function PostDetailModal() {
               </AppText>
             </View>
           </View>
+          {/* Fala 1 #1 — sub-reply scope context bar. Shows "Replying
+              to @handle" when activeReplyId is set, with an X to drop
+              back to top-level scope. Mirrors Twitter's "Replying to"
+              header above the input. */}
+          {activeReplyId
+            ? (() => {
+                const target = post.threadReplies.find(
+                  (x) => x.id === activeReplyId,
+                );
+                if (!target) return null;
+                const targetAuthor =
+                  target.authorId === "player"
+                    ? {
+                        handle: state.player.handle,
+                      }
+                    : resolveCharacter(target.authorId);
+                if (!targetAuthor) return null;
+                return (
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 6,
+                      backgroundColor: colors.surface,
+                      paddingHorizontal: 10,
+                      paddingVertical: 6,
+                      borderRadius: radii.pill,
+                      alignSelf: "flex-start",
+                    }}
+                  >
+                    <AppText size={12} color={colors.muted}>
+                      Replying to
+                    </AppText>
+                    <AppText size={12} weight="800" color={colors.blue}>
+                      {targetAuthor.handle}
+                    </AppText>
+                    <Pressable
+                      onPress={() => setActiveReplyId(null)}
+                      hitSlop={8}
+                      style={{ marginLeft: 4 }}
+                    >
+                      <AppText size={12} color={colors.muted2}>
+                        ×
+                      </AppText>
+                    </Pressable>
+                  </View>
+                );
+              })()
+            : null}
           <TextInput
             ref={replyInputRef}
             value={reply}
             onChangeText={setReply}
-            placeholder={`Reply to ${author.handle}`}
+            placeholder={
+              activeReplyId
+                ? "Tweet your reply"
+                : `Reply to ${author.handle}`
+            }
             placeholderTextColor={colors.muted}
             multiline
             // Faza I #5B — top-level reply matches Twitter reply length.
@@ -5088,6 +5507,7 @@ function PostDetailModal() {
             </Pressable>
           </View>
         </KeyboardAvoidingView>
+        )}
       </View>
     </Modal>
   );
@@ -5667,6 +6087,8 @@ function CreateActivityModal() {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [day, setDay] = useState(state.day + 1);
+  // Fala 2 — continuous time picker (24h). Default 19 = 7pm prime time.
+  const [hour, setHour] = useState<number>(19);
   const [invitees, setInvitees] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
@@ -5676,6 +6098,7 @@ function CreateActivityModal() {
       setDescription("");
       setInvitees([]);
       setDay(state.day + 1);
+      setHour(19);
     }
   }, [state.createActivityOpen, state.day]);
 
@@ -5692,6 +6115,7 @@ function CreateActivityModal() {
         description: description.trim(),
         inviteeIds: invitees,
         scheduledDay: day,
+        scheduledHour: hour,
       });
     } finally {
       setSubmitting(false);
@@ -5782,6 +6206,67 @@ function CreateActivityModal() {
               </View>
               <Pressable
                 onPress={() => setDay(day + 1)}
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: 18,
+                  backgroundColor: colors.surfaceAlt,
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <AppText size={16}>+</AppText>
+              </Pressable>
+            </View>
+          </View>
+          {/* Fala 2 — continuous hour picker (0-23). Two pressables
+              drift hour by ±1, label shows "HH:00 (period)" so the
+              player sees both the precise number and the vibe. */}
+          <View style={{ gap: 6 }}>
+            <AppText size={13} color={colors.muted2}>
+              Time of day
+            </AppText>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Pressable
+                onPress={() => setHour((h) => (h <= 0 ? 23 : h - 1))}
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: 18,
+                  backgroundColor: colors.surfaceAlt,
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <AppText size={16}>−</AppText>
+              </Pressable>
+              <View
+                style={{
+                  flex: 1,
+                  height: 36,
+                  borderRadius: radii.pill,
+                  backgroundColor: colors.surface,
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <AppText size={14} weight="800">
+                  {String(hour).padStart(2, "0")}:00
+                  {hour < 6
+                    ? " (late night)"
+                    : hour < 11
+                      ? " (morning)"
+                      : hour < 14
+                        ? " (midday)"
+                        : hour < 18
+                          ? " (afternoon)"
+                          : hour < 22
+                            ? " (evening)"
+                            : " (late night)"}
+                </AppText>
+              </View>
+              <Pressable
+                onPress={() => setHour((h) => (h >= 23 ? 0 : h + 1))}
                 style={{
                   width: 36,
                   height: 36,
@@ -6041,6 +6526,89 @@ function EditCharacterModal() {
 // ===================================================================
 //  PR ACTIONS MODAL — Round 1.11.32 Faza D
 // ===================================================================
+// Fala 3 — WinScreenModal. Triggers when mainGoalCompletedDay flips
+// from null to a day number (via maybeFireWinScreen in game-context).
+// Scenario-aware: in accidentally-famous, the body is a Grammy reveal;
+// other scenarios get a generic "main goal cleared" copy.
+function WinScreenModal() {
+  const { state, dismissWinScreen, resolveCharacter } = useGame();
+  const insets = useSafeAreaInsets();
+  const reveal = state.lastWinReveal;
+  const open = state.mainGoalCompletedDay !== null && !!reveal;
+  if (!open || !reveal) return null;
+  const winner =
+    reveal.winnerCharacterId === "player"
+      ? {
+          name: state.player.name,
+          handle: state.player.handle,
+          avatar: state.player.avatar,
+        }
+      : resolveCharacter(reveal.winnerCharacterId);
+  return (
+    <Modal visible animationType="fade" transparent>
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: "rgba(0,0,0,0.85)",
+          alignItems: "center",
+          justifyContent: "center",
+          paddingHorizontal: 24,
+          paddingTop: insets.top,
+          paddingBottom: insets.bottom,
+        }}
+      >
+        <View
+          style={{
+            backgroundColor: colors.surface,
+            borderRadius: 24,
+            paddingHorizontal: 24,
+            paddingVertical: 28,
+            alignItems: "center",
+            gap: 14,
+            maxWidth: 380,
+          }}
+        >
+          <AppText size={32}>🏆</AppText>
+          <AppText size={18} weight="900" style={{ textAlign: "center" }}>
+            {reveal.headline}
+          </AppText>
+          {winner ? (
+            <View style={{ alignItems: "center", gap: 6 }}>
+              <Avatar uri={winner.avatar} size={68} ring={colors.amber} ringWidth={3} />
+              <AppText size={15} weight="900">
+                {winner.name}
+              </AppText>
+              <AppText size={12} color={colors.muted2}>
+                {winner.handle}
+              </AppText>
+            </View>
+          ) : null}
+          <AppText size={14} color={colors.muted} style={{ textAlign: "center" }}>
+            {reveal.body}
+          </AppText>
+          <AppText size={12} color={colors.muted2} style={{ textAlign: "center" }}>
+            Goals cleared: {state.goalsCompleted + 1}
+          </AppText>
+          <Pressable
+            onPress={dismissWinScreen}
+            style={{
+              marginTop: 6,
+              backgroundColor: colors.blue,
+              paddingHorizontal: 24,
+              paddingVertical: 12,
+              borderRadius: radii.pill,
+            }}
+          >
+            <AppText size={14} weight="900">
+              Onto the next chapter →
+            </AppText>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 // Three sections: PR Stunts (3 AI/offline options), Laying Low toggle,
 // Divert Attention (pick a cast member to throw under the bus). Opens
 // whenever `prActionsOpen === true` (CrisisBar tap).
