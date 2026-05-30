@@ -465,4 +465,15 @@ export type GameState = {
   // person who would otherwise comment "all the time" (the user
   // explicitly reported @stannery_vessel doing this).
   recentCommenters: string[];
+
+  // ===== Faza J #3 — Network status indicator =====
+  // True when the last AI call (generateSinglePost / generateEvent /
+  // generatePostReplies / requestCelebrityReply) successfully reached
+  // the model provider. False when the last call fell through to the
+  // offline content bank — either because the API key is missing,
+  // Gemini returned 503/429 past the retry budget, or a parse error
+  // tripped the catch path. Drives the small ONLINE/OFFLINE chip in
+  // FeedHeader so the player knows whether the world is "breathing"
+  // live AI right now or coasting on fallback content.
+  aiOnline: boolean;
 };

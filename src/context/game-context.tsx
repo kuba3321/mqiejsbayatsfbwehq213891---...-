@@ -315,6 +315,8 @@ function createInitialState(): GameState {
     // Round 1.11.32 G-Fix #3 — start with empty exhaustion queue so
     // Day 1 fan-slot picks have full 30-pool variety.
     recentCommenters: [],
+    // Faza J #3 — assume online until the first call says otherwise.
+    aiOnline: true,
     // Round 1.11.32 Faza E — crisis defaults via resetCrisisState helper.
     // Same shape consumed by initializeCharacter on scenario rollover.
     ...resetCrisisState(),
@@ -1146,6 +1148,10 @@ export function GameProvider({ children }: PropsWithChildren) {
             recentCommenters: nextExhausted,
             isFetchingBackgroundPost: false,
             lastBackgroundFetchError: null,
+            // Faza J #3 — broadcast network status. result._fromOffline
+            // === true means we fell through to the offline bank; false
+            // / undefined means the AI provider actually responded.
+            aiOnline: !result._fromOffline,
           };
         });
       } catch (err) {
@@ -1159,6 +1165,10 @@ export function GameProvider({ children }: PropsWithChildren) {
             ...s2,
             isFetchingBackgroundPost: false,
             lastBackgroundFetchError: { at: Date.now(), tries },
+            // Faza J #3 — catastrophic catch path means the AI service
+            // didn't even fall through to offline cleanly; force the
+            // chip to OFFLINE since we're definitely not on AI right now.
+            aiOnline: false,
             // After two consecutive failures surface the Faza A top toast.
             // The toast is non-blocking — pull-to-refresh still works.
             lastToast:
@@ -1312,6 +1322,8 @@ export function GameProvider({ children }: PropsWithChildren) {
             pendingNextEvent: null,
             pendingPostSuggestions: null,
             recentCommenters: [],
+    // Faza J #3 — assume online until the first call says otherwise.
+    aiOnline: true,
             // Round 1.11.32 Faza E — fresh slate via DRY helper. Crisis
             // state never carries across scenarios; resetCrisisState() is
             // the single source of truth for the wipe shape.

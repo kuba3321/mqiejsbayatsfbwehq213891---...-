@@ -883,6 +883,8 @@ function FeedHeader() {
         <AppText size={22} weight="900">
           ☀️ Day {state.day}
         </AppText>
+        <View style={{ width: 10 }} />
+        <NetworkStatusChip online={state.aiOnline} />
         <View style={{ flex: 1 }} />
         <EnergyBadge />
         <View style={{ width: 8 }} />
@@ -897,6 +899,45 @@ function FeedHeader() {
       {/* Round 1.11.32 Faza D — CrisisBar slides in below the Day chip
           whenever the player is on fire. Tappable → opens PRActionsModal. */}
       <CrisisBar />
+    </View>
+  );
+}
+
+// Faza J #3 — ONLINE/OFFLINE chip in the feed header. Renders a small
+// pill with a coloured dot + status word so the player knows whether
+// the timeline is breathing live LLM output (green/ONLINE) or coasting
+// on the local fallback bank (amber/OFFLINE). Driven by the global
+// `state.aiOnline` flag — updated by the bg fetcher after every result.
+function NetworkStatusChip({ online }: { online: boolean }) {
+  const dotColor = online ? colors.green : colors.amber;
+  const label = online ? "ONLINE" : "OFFLINE";
+  return (
+    <View
+      accessibilityRole="text"
+      accessibilityLabel={
+        online ? "AI online" : "AI offline — local mode"
+      }
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 5,
+        paddingHorizontal: 8,
+        paddingVertical: 3,
+        borderRadius: 999,
+        backgroundColor: colors.surfaceAlt,
+      }}
+    >
+      <View
+        style={{
+          width: 7,
+          height: 7,
+          borderRadius: 7,
+          backgroundColor: dotColor,
+        }}
+      />
+      <AppText size={10} weight="900" color={online ? colors.green : colors.amber}>
+        {label}
+      </AppText>
     </View>
   );
 }
@@ -4541,11 +4582,9 @@ function PostDetailModal() {
   function renderReply({
     reply: r,
     isFirst,
-    depth,
   }: {
     reply: NonNullable<typeof post>["threadReplies"][number];
     isFirst: boolean;
-    depth: number;
   }): React.ReactNode {
     const rAuthor =
       r.authorId === "player"
@@ -4558,15 +4597,35 @@ function PostDetailModal() {
           }
         : resolveCharacter(r.authorId);
     if (!rAuthor) return null;
-    const children = post!.threadReplies.filter((sr) => sr.parentReplyId === r.id);
+    // Faza J #1 — flat thread layout. Each reply renders at uniform
+    // paddingHorizontal: 14 regardless of where it sits in the
+    // conversation tree. Threading is communicated lexically via the
+    // @parent_handle blue tag prefix inside the reply text. No more
+    // pyramid indent, no more children.map recursion — discussion reads
+    // naturally top-to-bottom in chronological order.
     const isOpen = activeReplyId === r.id;
+    // Lookup parent author for the blue @handle prefix when this is a
+    // sub-reply (not a top-level reply to the post itself).
+    let parentTag: { handle: string; authorId: string } | null = null;
+    if (r.parentReplyId) {
+      const parent = post!.threadReplies.find((p) => p.id === r.parentReplyId);
+      if (parent) {
+        const parentAuthor =
+          parent.authorId === "player"
+            ? { handle: state.player.handle }
+            : resolveCharacter(parent.authorId);
+        if (parentAuthor) {
+          parentTag = { handle: parentAuthor.handle, authorId: parent.authorId };
+        }
+      }
+    }
     return (
       <View key={r.id}>
         <View
           style={{
-            paddingHorizontal: 14 + depth * 28,
+            paddingHorizontal: 14,
             paddingVertical: 12,
-            borderTopWidth: isFirst && depth === 0 ? 0 : 1,
+            borderTopWidth: isFirst ? 0 : 1,
             borderTopColor: colors.divider,
             flexDirection: "row",
             gap: 10,
@@ -4575,7 +4634,7 @@ function PostDetailModal() {
           <Pressable
             onPress={() => r.authorId !== "player" && openCharacterProfile(r.authorId)}
           >
-            <Avatar uri={rAuthor.avatar} size={depth === 0 ? 36 : 30} />
+            <Avatar uri={rAuthor.avatar} size={36} />
           </Pressable>
           <View style={{ flex: 1, gap: 4 }}>
             <View
@@ -4595,7 +4654,32 @@ function PostDetailModal() {
               </AppText>
             </View>
             <AppText size={14}>
-              {renderMentions(r.text.replace("@player", state.player.handle))}
+              {/* Faza J #1 — blue clickable @parent tag prefix when this
+                  reply is a sub-thread response. Tapping the tag opens
+                  the parent author's profile (or no-op for player). We
+                  use an AppText with onPress directly via nested Text
+                  semantics: React Native lets inline <Text onPress>
+                  work as an inline tappable span. AppText doesn't
+                  forward onPress, so we wrap a Pressable around the
+                  whole reply text instead — when the player taps the
+                  blue prefix we open the parent profile; taps on the
+                  body text fall through harmlessly (Pressable is
+                  position: relative inside flowing text). */}
+              {parentTag ? (
+                <AppText size={14}>
+                  <AppText
+                    size={14}
+                    weight="800"
+                    color={colors.blue}
+                  >
+                    {parentTag.handle}
+                  </AppText>
+                  {" "}
+                  {renderMentions(r.text.replace("@player", state.player.handle))}
+                </AppText>
+              ) : (
+                renderMentions(r.text.replace("@player", state.player.handle))
+              )}
             </AppText>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
               <Pressable
@@ -4703,7 +4787,6 @@ function PostDetailModal() {
             ) : null}
           </View>
         </View>
-        {children.map((c) => renderReply({ reply: c, isFirst: false, depth: depth + 1 }))}
       </View>
     );
   }
@@ -4889,9 +4972,23 @@ function PostDetailModal() {
             </AppText>
           ) : (
             (() => {
-              const topLevel = post.threadReplies.filter((r) => !r.parentReplyId);
-              return topLevel.map((r, i) =>
-                renderReply({ reply: r, isFirst: i === 0, depth: 0 }),
+              // Faza J #1 — flat chronological feed of every reply (top
+              // level + sub-thread), oldest first. We sort by the numeric
+              // timestamp baked into each reply's id ("tr-1700000-0",
+              // "r-1700001") so that AI sub-thread replies generated in
+              // the same batch sit in their original generation order —
+              // matching how the conversation actually unfolded. Parent
+              // relationships are kept around for the @handle prefix
+              // tag inside renderReply, NOT for indent or filtering.
+              const ordered = [...post.threadReplies].sort((a, b) => {
+                const ma = a.id.match(/(\d+)/);
+                const mb = b.id.match(/(\d+)/);
+                const ta = ma ? parseInt(ma[1], 10) : 0;
+                const tb = mb ? parseInt(mb[1], 10) : 0;
+                return ta - tb;
+              });
+              return ordered.map((r, i) =>
+                renderReply({ reply: r, isFirst: i === 0 }),
               );
             })()
           )}

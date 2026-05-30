@@ -1673,6 +1673,11 @@ export type SinglePostResult = {
   // choice). Kept tiny — these are background flavor posts, not the heavy
   // applyWorldUpdate beats.
   relationshipShift?: { characterId: string; delta: number; reason: string };
+  // Faza J #3 — true when this result came from the offline content bank
+  // (no key / 503 retry exhausted / parse failure). Drives the
+  // ONLINE/OFFLINE chip in the feed header. Optional so existing call
+  // sites that don't care about the flag keep compiling.
+  _fromOffline?: boolean;
 };
 
 // Build an offline-synthesized single post when the network is unreachable
@@ -1705,14 +1710,23 @@ function buildOfflineSinglePost(args: {
       characterId: author,
       text,
       threadReplies: buildOfflineThreadReplies(fanIds, wideCommentBank).slice(0, replyCount),
+      _fromOffline: true,
     };
   }
   // Celeb path — reuse the same template selector buildOfflineWorldUpdate uses.
+  // Faza J #2 — first-person fallback voice. The previous templates
+  // wrote ABOUT the celeb in third person ("Sabrina dropped something
+  // the timeline cannot stop talking about") which broke the illusion
+  // that these are the celeb's OWN account posts. New defaults speak
+  // as the celebrity themselves.
   const scenarioBank = scenarioPostTemplates[args.world.id];
   const charBank = scenarioBank?.[args.character.id];
   const fallback = scenarioBank?.["default"] ?? [
-    `${args.character.name.split(" ")[0]} dropped something the timeline cannot stop talking about.`,
-    `Whatever ${args.character.name.split(" ")[0]} is doing tonight is rewiring the feed.`,
+    "just dropped something new and the timeline is already losing it ✨",
+    "honestly whatever i'm doing right now i'm doing it for the culture",
+    "locked in the studio since 3 am. this next era is going to surprise everyone",
+    "i'm not saying anything yet. but you'll know when you know",
+    "the bridge on this one… i'm not okay. i made me cry.",
   ];
   const line = pickRandom(charBank && charBank.length > 0 ? charBank : fallback);
   // Celeb post pulls a wider crowd: 2-9 replies (was 3-5).
@@ -1721,6 +1735,7 @@ function buildOfflineSinglePost(args: {
     characterId: args.character.id,
     text: line,
     threadReplies: buildOfflineThreadReplies(anonymousFanIds, wideCommentBank).slice(0, replyCount),
+    _fromOffline: true,
   };
 }
 
