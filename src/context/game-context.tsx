@@ -62,6 +62,7 @@ import {
   resolveEventChoice,
 } from "@/services/ai";
 // sentiment.ts now only re-exports clampPercent; calculateVibeBump was removed.
+import { formatRepostCount, parseRepostCount } from "@/utils/formatters";
 
 const GAME_STATE_PATH = (FileSystem.documentDirectory ?? "") + "status_game_state.json";
 const API_KEY_SECURE_KEY = "status-api-key";
@@ -579,6 +580,12 @@ export function GameProvider({ children }: PropsWithChildren) {
   // The global `state.isGenerating` is still set/cleared in parallel — that
   // one drives the UI "disabled" affordance; this ref is the contract.
   const isFetchingRef = useRef(false);
+  // Refactor #3 — debounce apiKey writes to SecureStore. UI fires
+  // updateProfile({ apiKey: nextChar }) on every keystroke when the
+  // player types/pastes; each call previously spawned a native
+  // SecureStore.setItemAsync (real IO syscall). Debouncing to 600ms
+  // means the player can paste a 100-char key and we make ONE write.
+  const apiKeySaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     stateRef.current = state;
@@ -589,11 +596,40 @@ export function GameProvider({ children }: PropsWithChildren) {
     (async () => {
       // Game state lives on disk in documentDirectory; API key stays in SecureStore.
       let loadedState: Partial<GameState> | null = null;
+      let rawRead: string | null = null;
       try {
-        const raw = await FileSystem.readAsStringAsync(GAME_STATE_PATH);
-        loadedState = JSON.parse(raw) as Partial<GameState>;
+        rawRead = await FileSystem.readAsStringAsync(GAME_STATE_PATH);
       } catch {
-        /* file missing / corrupted — fall through to initial state */
+        /* file missing — first run; fall through to initial state */
+      }
+      if (rawRead !== null) {
+        try {
+          loadedState = JSON.parse(rawRead) as Partial<GameState>;
+        } catch (parseErr) {
+          // Refactor #6 — preserve corrupted save for diagnostics
+          // instead of silently throwing the player's progress away. We
+          // rename it to `.corrupted` (with a timestamp suffix so
+          // multiple corruptions don't overwrite each other) BEFORE
+          // falling through to createInitialState. The player can
+          // surface it to the team for post-mortem; meanwhile they
+          // restart fresh instead of looping on a parse error every
+          // cold start.
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          const corruptedPath = `${GAME_STATE_PATH}.corrupted.${stamp}`;
+          try {
+            await FileSystem.moveAsync({ from: GAME_STATE_PATH, to: corruptedPath });
+            console.warn(
+              `[persist] save corrupted, preserved as ${corruptedPath}:`,
+              parseErr,
+            );
+          } catch (moveErr) {
+            console.warn(
+              "[persist] save corrupted AND could not be renamed:",
+              parseErr,
+              moveErr,
+            );
+          }
+        }
       }
       let storedApiKey: string | null = null;
       try {
@@ -692,9 +728,25 @@ export function GameProvider({ children }: PropsWithChildren) {
       const serialized = JSON.stringify(snapshot);
       if (serialized === lastSavedHashRef.current) return;
       lastSavedHashRef.current = serialized;
-      void FileSystem.writeAsStringAsync(GAME_STATE_PATH, serialized).catch((err) => {
-        console.warn("[persist] FileSystem.writeAsStringAsync failed:", err);
-      });
+      // Refactor #7 — atomic save. Writing directly to GAME_STATE_PATH
+      // leaves the file half-written if the process is killed mid-flush
+      // (OS crash, OOM kill, user force-quit). Writing to .tmp first +
+      // moveAsync to final means the previous valid save stays intact
+      // until the new one is fully on disk; the move is a single fs
+      // syscall on Expo's underlying FS so it's either fully applied or
+      // not applied at all. We also defensively delete a stale .tmp
+      // from a previous crash before writing this one.
+      const tmpPath = `${GAME_STATE_PATH}.tmp`;
+      (async () => {
+        try {
+          // Delete a leftover .tmp from a prior crash (idempotent: OK if missing).
+          await FileSystem.deleteAsync(tmpPath, { idempotent: true });
+          await FileSystem.writeAsStringAsync(tmpPath, serialized);
+          await FileSystem.moveAsync({ from: tmpPath, to: GAME_STATE_PATH });
+        } catch (err) {
+          console.warn("[persist] atomic save failed:", err);
+        }
+      })();
     }, 800);
     return () => clearTimeout(timeout);
     // Granular deps — only persisted fields. UI flags intentionally excluded.
@@ -740,6 +792,19 @@ export function GameProvider({ children }: PropsWithChildren) {
     state.recentCommenters,
     state.onboardingSeen,
   ]);
+
+  // Refactor #1 — Heavy haptic at the 50-crisis threshold lives here,
+  // OUTSIDE the pure reducer. Tracks previous level via ref so we fire
+  // exactly once on the upward crossing (prev < 50 && new >= 50);
+  // PR-stunt downward movement and laying-low decay never re-fire it.
+  const prevCrisisRef = useRef(state.crisisLevel);
+  useEffect(() => {
+    const prev = prevCrisisRef.current;
+    if (prev < 50 && state.crisisLevel >= 50) {
+      heavyHaptic();
+    }
+    prevCrisisRef.current = state.crisisLevel;
+  }, [state.crisisLevel]);
 
   // ===========================================================
   // Round 1.11.32 Faza B — BACKGROUND PRE-FETCH ENGINE
@@ -1135,6 +1200,13 @@ export function GameProvider({ children }: PropsWithChildren) {
           const starterFollowers = isAccidentallyFamous
             ? Math.floor(50 + Math.random() * 250)
             : 0;
+          // Refactor #2 — name the fresh contacts record ONCE, then feed
+          // both the state field AND buildDailyAuthorPool from it. The
+          // previous code used `Object.keys(s.contacts)` which read the
+          // STALE contacts from the PREVIOUS scenario, leaking cast IDs
+          // into the new scenario's daily pool. nextContacts is the
+          // single source of truth.
+          const nextContacts: GameState["contacts"] = emptyContacts();
           return {
             ...s,
             player: {
@@ -1154,7 +1226,7 @@ export function GameProvider({ children }: PropsWithChildren) {
             milestones: initialMilestones(),
             sideQuests: initialSideQuests,
             posts: starterPosts.map((p) => ({ ...p, threadReplies: [...p.threadReplies] })),
-            contacts: emptyContacts(),
+            contacts: nextContacts,
             notifications: [],
             activityLog: [],
             activities: [],
@@ -1181,8 +1253,9 @@ export function GameProvider({ children }: PropsWithChildren) {
             // the feed. Cast IDs come from contacts after addCharacter
             // calls; on Day 1 the player may have 0 cast → the pool falls
             // back to outlet fillers + full 5+6=11 fan slots.
+            // Refactor #2 — pool built from FRESH nextContacts (not stale s.contacts).
             dailyAuthorPool: buildDailyAuthorPool(
-              Object.keys(s.contacts),
+              Object.keys(nextContacts),
               outletCharacters.map((o) => o.id),
             ),
             pendingBackgroundPosts: [],
@@ -1252,18 +1325,13 @@ export function GameProvider({ children }: PropsWithChildren) {
           ...s,
           posts: s.posts.map((p) => {
             if (p.id !== postId) return p;
+            // Refactor #9 — hardened parse via utils/formatters. Old
+            // inline regex was vulnerable to "12..4K" (LLM hallucinated
+            // double dot) returning 12 instead of failing safe.
             const wasReposted = !!p.reposted;
-            const raw = p.reposts ?? "0";
-            const num = parseFloat(raw.replace(/[^0-9.]/g, "")) || 0;
-            const suffixMatch = raw.match(/[KM]\s*$/i);
-            const suffix = suffixMatch ? suffixMatch[0].toUpperCase() : "";
-            // Bump unit depends on suffix: 1 raw count == 0.001K == 0.000001M.
-            const unit = suffix === "K" ? 0.001 : suffix === "M" ? 0.000001 : 1;
-            const delta = wasReposted ? -unit : unit;
-            const next = Math.max(0, num + delta);
-            const reposts = suffix
-              ? `${next.toFixed(1)}${suffix}`
-              : `${Math.max(0, Math.round(next))}`;
+            const total = parseRepostCount(p.reposts);
+            const next = Math.max(0, total + (wasReposted ? -1 : 1));
+            const reposts = formatRepostCount(next);
             return { ...p, reposted: !wasReposted, reposts };
           }),
         }));
@@ -1991,6 +2059,15 @@ export function GameProvider({ children }: PropsWithChildren) {
 
       // ----- event flow
       triggerEvent: async () => {
+        // Refactor #4 — synchronous double-tap guard. Mirrors the
+        // refreshFeed/sendChatMessage pattern: isFetchingRef flips
+        // SYNCHRONOUSLY before any setState commits, so two taps in the
+        // same animation frame cannot both pass the gate. The async
+        // `state.isGenerating` flag fires later (batched setState),
+        // which used to leave a ~30ms window where double-taps both
+        // launched generateEvent network calls in parallel.
+        if (isFetchingRef.current) return;
+        if (stateRef.current.isGenerating) return;
         // Round 1.11.32 Faza G — Medium tier: triggering an event opens a
         // new beat of the day. Player is committing to the next chapter.
         mediumHaptic();
@@ -2010,7 +2087,10 @@ export function GameProvider({ children }: PropsWithChildren) {
         }
         // Fallback path — no prefetch available (network failed, cold
         // start, or player triggered an event before the bg fetcher had
-        // cycles). Show the live-fetch loader as before.
+        // cycles). Show the live-fetch loader as before. Lock held for
+        // the whole AI round-trip so a second tap during the wait is a
+        // no-op.
+        isFetchingRef.current = true;
         setState((s) => ({ ...s, eventOpen: true, isGenerating: true }));
         try {
           const event = await generateEvent({
@@ -2021,6 +2101,7 @@ export function GameProvider({ children }: PropsWithChildren) {
           });
           setPendingEvent(event);
         } finally {
+          isFetchingRef.current = false;
           setState((s) => ({ ...s, isGenerating: false }));
         }
       },
@@ -2368,8 +2449,22 @@ export function GameProvider({ children }: PropsWithChildren) {
         });
       },
       updateProfile: (profile) => {
+        // Refactor #3 — state mutates synchronously (player sees field
+        // update immediately), but SecureStore write is debounced. The
+        // pending timer is rescheduled on each keystroke; only the LAST
+        // value lands in SecureStore. flushApiKeySave runs at unmount /
+        // app background to guarantee no in-flight character is lost.
         if (typeof profile.apiKey === "string") {
-          void SecureStore.setItemAsync(API_KEY_SECURE_KEY, profile.apiKey).catch(() => undefined);
+          const pendingKey = profile.apiKey;
+          if (apiKeySaveTimerRef.current) {
+            clearTimeout(apiKeySaveTimerRef.current);
+          }
+          apiKeySaveTimerRef.current = setTimeout(() => {
+            void SecureStore.setItemAsync(API_KEY_SECURE_KEY, pendingKey).catch(
+              () => undefined,
+            );
+            apiKeySaveTimerRef.current = null;
+          }, 600);
         }
         setState((s) => ({ ...s, player: { ...s.player, ...profile } }));
       },
@@ -2896,16 +2991,14 @@ function applyCrisisDelta(
   delta: number,
   origin?: CrisisOrigin,
 ): GameState {
+  // Refactor #1 — applyCrisisDelta is now a 100% pure reducer. The
+  // previous version invoked heavyHaptic() inline when crisisLevel
+  // crossed 50 upward, which violated reducer purity (this function is
+  // called inside setState callbacks; React may invoke them multiple
+  // times during concurrent rendering, which would multi-fire the
+  // haptic). The threshold-cross side effect now lives in a useEffect
+  // inside GameProvider that watches state.crisisLevel.
   const newLevel = Math.max(0, Math.min(100, s.crisisLevel + delta));
-  // Round 1.11.32 Faza G — Heavy haptic on the 50 threshold crossing.
-  // The "drama just hit a milestone" moment — pop-music critic timeline
-  // tips from passing storm into full meltdown. Only fires on UPWARD
-  // crossing (prev < 50 && new >= 50) so PR-stunt downward movement
-  // doesn't accidentally retrigger it. Fire-and-forget side effect; the
-  // reducer itself stays pure on its return value.
-  if (s.crisisLevel < 50 && newLevel >= 50) {
-    heavyHaptic();
-  }
   if (s.crisisLevel === 0 && newLevel > 0) {
     return {
       ...s,
@@ -3205,9 +3298,10 @@ function applyPostReplies(
   // replies visibly grow on every refresh, even from a 0-follower start.
   const posts = s.posts.map((p) => {
     if (p.id !== postId) return p;
-    const newReposts =
-      result.metrics?.repostBoost ??
-      `${(((parseFloat(p.reposts.replace(/[^0-9.]/g, "")) || 0) + Math.random() * 50)).toFixed(1)}K`;
+    // Refactor #9 — hardened parse + format via utils/formatters.
+    const currentReposts = parseRepostCount(p.reposts);
+    const bumpedReposts = currentReposts + Math.random() * 50_000;
+    const newReposts = result.metrics?.repostBoost ?? formatRepostCount(bumpedReposts);
     const bumpedExisting = p.threadReplies.map((tr) =>
       tr.authorId === "player"
         ? {

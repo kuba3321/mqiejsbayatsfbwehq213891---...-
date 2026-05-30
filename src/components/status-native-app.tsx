@@ -38,6 +38,7 @@ import * as Haptics from "expo-haptics";
 import * as ImagePicker from "expo-image-picker";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Alert,
   Animated,
   KeyboardAvoidingView,
   Modal,
@@ -3897,7 +3898,25 @@ function AppSettingsModal() {
             </AppText>
           </View>
 
+          {/* Refactor #11 — widget was a Pressable with no onPress
+              for many rounds (visual lie: "Tap to read" but nothing
+              happened). Now opens a What's New alert with the v1.0
+              launch summary so the chevron and the "Tap to read"
+              subtitle deliver on their promise. */}
           <Pressable
+            onPress={() =>
+              Alert.alert(
+                "What's new — v1.0",
+                [
+                  "• Crisis system: stan-wars-grade defense + Pop Craze diverts",
+                  "• Pre-fetched events + suggestions — 0 ms when you tap",
+                  "• Local avatar assets for every celeb / outlet / fan",
+                  "• Plus Jakarta Sans across the UI",
+                  "• Atomic save with corrupted-save preservation",
+                ].join("\n"),
+                [{ text: "OK" }],
+              )
+            }
             style={{
               flexDirection: "row",
               alignItems: "center",
