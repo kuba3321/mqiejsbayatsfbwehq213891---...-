@@ -40,8 +40,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Animated,
+  AppState,
+  FlatList,
   KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -1040,9 +1043,27 @@ function FeedScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: colors.bg }}>
       <FeedHeader />
-      <ScrollView
+      {/* Faza I #1 — FlatList replaces ScrollView+.map for the feed.
+          Virtualisation: only on-screen posts mount; off-screen rows
+          unmount but the data stays in state. windowSize=10 keeps a
+          ~10-screen window in memory (sweet spot between scroll smoothness
+          and footprint). initialNumToRender=8 paints the first viewport
+          fast on cold start. removeClippedSubviews=true (Android-only by
+          default) ditches off-window views from the native tree. Memory
+          ceiling is now bounded regardless of feed length, vs ScrollView
+          which kept every post mounted forever. */}
+      <FlatList
+        data={state.posts}
+        keyExtractor={(post) => post.id}
+        renderItem={({ item, index }) => (
+          <FeedPostItem post={item} showDivider={index !== 0} />
+        )}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 200 }}
+        windowSize={10}
+        initialNumToRender={8}
+        maxToRenderPerBatch={5}
+        removeClippedSubviews
         refreshControl={
           <RefreshControl
             refreshing={refreshing || (waitingForBg && state.isFetchingBackgroundPost)}
@@ -1050,11 +1071,7 @@ function FeedScreen() {
             tintColor={colors.blue}
           />
         }
-      >
-        {state.posts.map((post, index) => (
-          <FeedPostItem key={post.id} post={post} showDivider={index !== 0} />
-        ))}
-      </ScrollView>
+      />
 
       {/* Event button — centered absolutely at the horizontal midpoint
           of the screen via a full-width wrapper (pointerEvents:"box-none"
@@ -1469,6 +1486,10 @@ function ComposeModal() {
             placeholderTextColor={colors.muted}
             multiline
             autoFocus
+            // Faza I #5B — hard cap. 500 chars covers Twitter-style 280
+            // plus a generous expansion. Prevents paste-bomb attacks
+            // from blowing the AI prompt's token budget.
+            maxLength={500}
             style={{
               color: colors.text,
               fontSize: 18,
@@ -1720,6 +1741,8 @@ function EventModal() {
               placeholder="What do you do?"
               placeholderTextColor={colors.muted}
               multiline
+              // Faza I #5B — event action is a short narrative beat.
+              maxLength={300}
               style={{
                 color: colors.text,
                 fontSize: 16,
@@ -2449,11 +2472,15 @@ function ChatRoom({ characterId, onBack }: { characterId: string; onBack: () => 
       </ScrollView>
 
       <KeyboardAvoidingView
-        behavior="padding"
-        // Round 1.11.32 G-Fix #1 — Chat composer mirrors post detail
-        // (same insets.bottom + 30 offset) so keyboard never covers the
-        // send button.
-        keyboardVerticalOffset={insets.bottom + 30}
+        // Faza I #2 — Platform-conditional keyboard handling.
+        // iOS: behavior="padding" + offset pushes content above keyboard.
+        // Android: behavior=undefined + offset=0. Android's window manager
+        // already runs in adjustResize mode by default, which physically
+        // shrinks the layout when the keyboard opens. Layering
+        // behavior="padding" on top of that double-adds margin, sending
+        // the composer flying to the middle of the screen.
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        keyboardVerticalOffset={Platform.OS === "ios" ? insets.bottom + 30 : 0}
         style={{
           position: "absolute",
           left: 0,
@@ -2494,6 +2521,9 @@ function ChatRoom({ characterId, onBack }: { characterId: string; onBack: () => 
             onChangeText={setMessage}
             placeholder="Message..."
             placeholderTextColor={colors.muted}
+            // Faza I #5B — DM message cap. 800 chars allows a paragraph
+            // without flooding the chat history.
+            maxLength={800}
             style={{
               flex: 1,
               color: colors.text,
@@ -2579,6 +2609,16 @@ function ChatBubble({
 // "Ariana Grande: @ishowspeed please let him breathe" becomes
 // "Ariana Grande: [@ishowspeed in blue] please let him breathe".
 function renderPreviewWithMentions(text: string, baseColor: string) {
+  // Faza I #3 — defensive guard. The signature is `text: string` so
+  // TypeScript blocks compile-time misuse, BUT a hydrated save from an
+  // older app version could legitimately deserialise `preview: null`
+  // because the type was `string | undefined` in earlier formats.
+  // .split() on a non-string throws a TypeError that nukes the whole
+  // AlertsScreen. Render an empty fragment instead — the row still has
+  // the headline, only the preview line is missing.
+  if (typeof text !== "string" || text.length === 0) {
+    return null;
+  }
   const parts = text.split(/(\s+)/);
   return parts.map((part, i) => {
     if (/^@\w/.test(part)) {
@@ -4612,6 +4652,8 @@ function PostDetailModal() {
                   placeholder={`Reply to ${rAuthor.handle}`}
                   placeholderTextColor={colors.muted}
                   multiline
+                  // Faza I #5B — sub-reply matches Twitter reply length.
+                  maxLength={280}
                   style={{
                     color: colors.text,
                     fontSize: 14,
@@ -4856,15 +4898,12 @@ function PostDetailModal() {
         </ScrollView>
 
         <KeyboardAvoidingView
-          behavior="padding"
-          // Round 1.11.32 G-Fix #1 — keyboardVerticalOffset added so the
-          // composer floats clear of the keyboard with a visible margin
-          // instead of pancake-flush against it. `insets.bottom + 30`
-          // covers the home-indicator lane + a comfortable readable gap
-          // above the keyboard top edge. paddingBottom bumped 40 → 60 so
-          // the Post button + Add a boost pill always sit above the
-          // home-indicator lane on every iPhone gesture profile.
-          keyboardVerticalOffset={insets.bottom + 30}
+          // Faza I #2 — Platform-conditional, mirrors ChatRoom logic.
+          // Android's adjustResize already resizes the window; layering
+          // padding behavior on top causes a "flying composer" bug. iOS
+          // needs explicit offset because the keyboard overlays the view.
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          keyboardVerticalOffset={Platform.OS === "ios" ? insets.bottom + 30 : 0}
           style={{
             position: "absolute",
             left: 0,
@@ -4897,6 +4936,8 @@ function PostDetailModal() {
             placeholder={`Reply to ${author.handle}`}
             placeholderTextColor={colors.muted}
             multiline
+            // Faza I #5B — top-level reply matches Twitter reply length.
+            maxLength={280}
             style={{
               color: colors.text,
               fontSize: 15,

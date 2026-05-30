@@ -5,11 +5,13 @@ import * as SecureStore from "expo-secure-store";
 import React, {
   createContext,
   PropsWithChildren,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
+import { AppState } from "react-native";
 
 import {
   characters as catalogCharacters,
@@ -586,10 +588,51 @@ export function GameProvider({ children }: PropsWithChildren) {
   // SecureStore.setItemAsync (real IO syscall). Debouncing to 600ms
   // means the player can paste a 100-char key and we make ONE write.
   const apiKeySaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Faza I #5A — companion ref for the value that's queued to write.
+  // Lets a background-flush handler push the latest typed key to
+  // SecureStore even if the 600ms debounce window hasn't elapsed yet.
+  const apiKeyPendingRef = useRef<string | null>(null);
+  const flushApiKey = useCallback(() => {
+    if (apiKeySaveTimerRef.current) {
+      clearTimeout(apiKeySaveTimerRef.current);
+      apiKeySaveTimerRef.current = null;
+    }
+    const pending = apiKeyPendingRef.current;
+    if (pending !== null) {
+      apiKeyPendingRef.current = null;
+      void SecureStore.setItemAsync(API_KEY_SECURE_KEY, pending).catch(
+        () => undefined,
+      );
+    }
+  }, []);
 
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  // Faza I #5A — lifecycle hardening for the debounced apiKey write.
+  // Two guarantees:
+  //   1. AppState transition to "background" / "inactive" flushes any
+  //      pending write IMMEDIATELY. iOS gives apps ~5 seconds after
+  //      backgrounding before suspending; the OS may also kill us
+  //      outright (e.g. memory pressure). Flushing on the transition
+  //      means a player who pastes their key and immediately swipes
+  //      home doesn't lose the in-flight characters waiting for the
+  //      600ms debounce to elapse.
+  //   2. Provider unmount (rare — GameProvider is the root, so really
+  //      this only fires on full app close / hot reload) also flushes,
+  //      AND clears the timer to keep React's StrictMode happy.
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "background" || next === "inactive") {
+        flushApiKey();
+      }
+    });
+    return () => {
+      sub.remove();
+      flushApiKey();
+    };
+  }, [flushApiKey]);
 
   useEffect(() => {
     let mounted = true;
@@ -2450,20 +2493,17 @@ export function GameProvider({ children }: PropsWithChildren) {
       },
       updateProfile: (profile) => {
         // Refactor #3 — state mutates synchronously (player sees field
-        // update immediately), but SecureStore write is debounced. The
-        // pending timer is rescheduled on each keystroke; only the LAST
-        // value lands in SecureStore. flushApiKeySave runs at unmount /
-        // app background to guarantee no in-flight character is lost.
+        // update immediately), but SecureStore write is debounced.
+        // Faza I #5A — pendingRef shadows the timer so a background
+        // AppState transition can flush the latest value even before
+        // the 600ms window elapses.
         if (typeof profile.apiKey === "string") {
-          const pendingKey = profile.apiKey;
+          apiKeyPendingRef.current = profile.apiKey;
           if (apiKeySaveTimerRef.current) {
             clearTimeout(apiKeySaveTimerRef.current);
           }
           apiKeySaveTimerRef.current = setTimeout(() => {
-            void SecureStore.setItemAsync(API_KEY_SECURE_KEY, pendingKey).catch(
-              () => undefined,
-            );
-            apiKeySaveTimerRef.current = null;
+            flushApiKey();
           }, 600);
         }
         setState((s) => ({ ...s, player: { ...s.player, ...profile } }));
