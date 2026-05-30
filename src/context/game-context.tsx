@@ -55,6 +55,7 @@ import {
   generateActivityOutcome,
   generateComposeSuggestions,
   generateEvent,
+  generateMilestoneEvent,
   generatePostReplies,
   generatePRStuntOptions,
   generateScenario,
@@ -195,6 +196,12 @@ const builtinMilestoneSeeds: Array<Omit<Milestone, "applied" | "completed">> = [
   { id: "award-stage", title: "Survive a live award-show camera cutaway", requirements: { bravery: 2, mystery: 1, wit: 2 }, xp: 125 },
 ];
 
+// v1.2 — expanded procedural milestone bank. 25 unique titles, each
+// representing a recognisable industry beat. Combined with the 3
+// builtin starter milestones, the scenario pre-generates 100 total
+// entries upfront (the bank cycles 4x with a rising XP curve), so the
+// player has a long visible road map without the engine having to
+// invent titles on the fly.
 const procMilestoneBank: Array<{ title: string; reqs: Record<SkillKey, number>; xp: number }> = [
   { title: "Fuel the rumors of a secret, unreleased collaboration", reqs: { bravery: 1, mystery: 2, wit: 0 }, xp: 140 },
   { title: "Have a major star's fan base demand your response to their beef", reqs: { bravery: 2, mystery: 0, wit: 2 }, xp: 165 },
@@ -202,26 +209,64 @@ const procMilestoneBank: Array<{ title: string; reqs: Record<SkillKey, number>; 
   { title: "Crash a live stream and walk out a meme", reqs: { bravery: 3, mystery: 0, wit: 2 }, xp: 210 },
   { title: "Trigger a worldwide stan war by saying one word", reqs: { bravery: 1, mystery: 3, wit: 1 }, xp: 235 },
   { title: "Convince the timeline a leaked DM was fake", reqs: { bravery: 0, mystery: 2, wit: 3 }, xp: 250 },
+  { title: "Land a magazine cover that breaks the news cycle", reqs: { bravery: 1, mystery: 2, wit: 1 }, xp: 270 },
+  { title: "Get cancelled on a Tuesday, reborn by Friday", reqs: { bravery: 3, mystery: 1, wit: 1 }, xp: 290 },
+  { title: "Drop a single during another star's roll-out and win the week", reqs: { bravery: 2, mystery: 2, wit: 1 }, xp: 310 },
+  { title: "Show up to a public feud and refuse to play", reqs: { bravery: 1, mystery: 3, wit: 0 }, xp: 330 },
+  { title: "Get name-dropped in an unrelated celebrity's apology", reqs: { bravery: 0, mystery: 3, wit: 2 }, xp: 350 },
+  { title: "Spark a meme cycle the writers room can't escape", reqs: { bravery: 0, mystery: 1, wit: 4 }, xp: 370 },
+  { title: "Host a livestream that breaks platform records", reqs: { bravery: 2, mystery: 1, wit: 2 }, xp: 395 },
+  { title: "Release a cover that overtakes the original", reqs: { bravery: 1, mystery: 1, wit: 3 }, xp: 415 },
+  { title: "Get a verified parody account banned for impersonation", reqs: { bravery: 1, mystery: 3, wit: 1 }, xp: 440 },
+  { title: "Make the front page of three outlets in one hour", reqs: { bravery: 2, mystery: 2, wit: 2 }, xp: 470 },
+  { title: "Survive a leaked voice note without addressing it", reqs: { bravery: 0, mystery: 4, wit: 1 }, xp: 495 },
+  { title: "Get an ironic endorsement deal that prints money", reqs: { bravery: 0, mystery: 2, wit: 4 }, xp: 520 },
+  { title: "Score a SNL host slot during a press cycle", reqs: { bravery: 3, mystery: 1, wit: 2 }, xp: 550 },
+  { title: "Make a B-side outsell the lead single", reqs: { bravery: 1, mystery: 2, wit: 3 }, xp: 580 },
+  { title: "Get a documentary greenlit about a single tweet", reqs: { bravery: 0, mystery: 3, wit: 3 }, xp: 615 },
+  { title: "Win 'Cultural Moment of the Year' in three different lists", reqs: { bravery: 2, mystery: 2, wit: 3 }, xp: 650 },
+  { title: "Skip a major awards show and become the story anyway", reqs: { bravery: 0, mystery: 4, wit: 2 }, xp: 690 },
+  { title: "Get a fan tattoo trend named after your bio line", reqs: { bravery: 1, mystery: 3, wit: 2 }, xp: 730 },
+  { title: "Lock down a streaming exclusive that breaks the algorithm", reqs: { bravery: 2, mystery: 2, wit: 4 }, xp: 780 },
 ];
+
+// v1.2 — total milestone count target. 3 builtin + 97 procedural = 100.
+// User explicit ask: "w sumie 100. co 5 mile stone, dostajesz mozliwosc
+// dodania character. co 1 jest ten 'event'". Bumped from 6-template
+// cycle to 25, so the cycle visibly varies before repeating.
+export const TOTAL_MILESTONES = 100;
 
 function generateProceduralMilestone(index: number): Milestone {
   const seed = procMilestoneBank[index % procMilestoneBank.length];
+  // XP scales upward across cycles so later milestones feel meatier.
+  const cycle = Math.floor(index / procMilestoneBank.length);
+  const xp = Math.floor(seed.xp * (1 + cycle * 0.3));
   return {
     id: `proc-${index}-${Date.now()}`,
     title: seed.title,
     requirements: seed.reqs,
     applied: { bravery: 0, mystery: 0, wit: 0 },
     completed: false,
-    xp: seed.xp,
+    xp,
   };
 }
 
 function initialMilestones(): Milestone[] {
-  return builtinMilestoneSeeds.map((s) => ({
+  // v1.2 — pre-generate the full 100-deep road map at scenario init.
+  // Old behaviour appended one procedural entry per completion; the
+  // new model gives the player a visible long-term plan from Day 1
+  // and lets the milestone-event runner reference a stable index.
+  const builtinList = builtinMilestoneSeeds.map((s) => ({
     ...s,
     applied: { bravery: 0, mystery: 0, wit: 0 },
     completed: false,
   }));
+  const procCount = Math.max(0, TOTAL_MILESTONES - builtinList.length);
+  const proc: Milestone[] = [];
+  for (let i = 0; i < procCount; i++) {
+    proc.push(generateProceduralMilestone(i));
+  }
+  return [...builtinList, ...proc];
 }
 
 // Round 1.11.32 G-Fix #5 — quests now have machine-verifiable conditions.
@@ -322,6 +367,8 @@ function createInitialState(): GameState {
     // Fala 1 #5 — empty mute list on fresh save. Toggle via
     // toggleMuteCharacter from CharacterProfileModal's bell button.
     mutedCharacterIds: [],
+    // v1.2 — empty event category queue; populated as AI generates events.
+    recentEventCategories: [],
     // Fala 2 — favorites tracked separately for posts vs replies so
     // the Favorites tab can render two clean lists.
     favoritedPostIds: [],
@@ -978,10 +1025,17 @@ export function GameProvider({ children }: PropsWithChildren) {
                 : []),
               ...cur.activityLog.slice(0, 8).map((l) => `Day ${l.day}: ${l.title}`),
             ],
+            // v1.2 — pass last 3 event categories so AI rotates.
+            recentCategories: cur.recentEventCategories,
           });
           setState((s2) => ({
             ...s2,
             pendingNextEvent: event,
+            // v1.2 — record this event's category so the NEXT prefetch
+            // can avoid the same flavour. Cap to 3 entries.
+            recentEventCategories: event.category
+              ? [...s2.recentEventCategories, event.category].slice(-3)
+              : s2.recentEventCategories,
             isFetchingBackgroundPost: false,
             lastBackgroundFetchError: null,
           }));
@@ -2328,8 +2382,17 @@ export function GameProvider({ children }: PropsWithChildren) {
             world: activeWorld,
             day: ref.day,
             recentLog: ref.activityLog.slice(0, 8).map((l) => `Day ${l.day}: ${l.title}`),
+            // v1.2 — anti-repetition.
+            recentCategories: ref.recentEventCategories,
           });
           setPendingEvent(event);
+          // v1.2 — push category into rotation queue.
+          if (event.category) {
+            setState((s) => ({
+              ...s,
+              recentEventCategories: [...s.recentEventCategories, event.category!].slice(-3),
+            }));
+          }
         } finally {
           isFetchingRef.current = false;
           setState((s) => ({ ...s, isGenerating: false }));
@@ -2603,6 +2666,15 @@ export function GameProvider({ children }: PropsWithChildren) {
       },
       applyMilestonePoints: () => {
         softHaptic();
+        // v1.2 — capture "did this point complete a milestone?" via a
+        // local variable inside the reducer closure. setState's reducer
+        // arg runs SYNCHRONOUSLY when called, so this flag is set
+        // before we look at it below. After the mutation, we fire the
+        // generateMilestoneEvent AI call as fire-and-forget; the
+        // notification + follower bump + relationship shifts land via
+        // a follow-up setState when the async resolves.
+        let triggerEvent: { title: string; index: number } | null = null;
+        let unlockNotif: NotificationItem | null = null;
         setState((s) => {
           if (s.skillPoints <= 0) return s;
           const index = s.milestones.findIndex((m) => !m.completed && !m.skipped);
@@ -2619,53 +2691,23 @@ export function GameProvider({ children }: PropsWithChildren) {
           const completed = (Object.keys(nextMilestone.requirements) as SkillKey[]).every(
             (k) => nextMilestone.applied[k] >= nextMilestone.requirements[k],
           );
-          let milestones = s.milestones.map((entry, i) =>
+          // v1.2 — initial milestones is now pre-generated to 100 (see
+          // TOTAL_MILESTONES). We no longer append on completion; the
+          // road map is fixed at scenario start so the player can see
+          // the full distance to walk.
+          const milestones = s.milestones.map((entry, i) =>
             i === index ? { ...nextMilestone, completed } : entry,
           );
           if (completed) {
-            milestones = [...milestones, generateProceduralMilestone(milestones.length - 2)];
-          }
-          // Fala 3 — milestone event: when a milestone completes, drop
-          // a Pop Craze leak post + small follower bump. This is the
-          // "event you don't control" — fires automatically. Every
-          // 5th milestone additionally seeds an unlock-suggestion
-          // notification so the player feels the system reward them
-          // with a new contact to add.
-          let milestoneAftermathPost: typeof s.posts[number] | null = null;
-          let milestoneFollowerBump = 0;
-          let milestoneNotif: typeof s.notifications[number] | null = null;
-          if (completed) {
-            const milestoneTitleSlug = m.title;
-            const playerHandle = s.player.handle;
-            const headlines = [
-              `${playerHandle} just unlocked: ${milestoneTitleSlug}. The timeline is recalibrating.`,
-              `Sources confirm ${playerHandle} hit ${milestoneTitleSlug}. Industry takes notice.`,
-              `${milestoneTitleSlug} is OFFICIAL for ${playerHandle}. Stans are flooding the algorithm.`,
-            ];
-            milestoneAftermathPost = {
-              id: `p-milestone-${Date.now()}`,
-              authorId: "pop-craze",
-              text: headlines[Math.floor(Math.random() * headlines.length)],
-              createdAt: nowLabel(),
-              day: s.day,
-              likes: Math.floor(80_000 + Math.random() * 300_000),
-              replies: 0,
-              reposts: `${(5 + Math.random() * 40).toFixed(1)}K`,
-              views: `${(100 + Math.random() * 600).toFixed(0)}K`,
-              threadReplies: [],
-            };
-            milestoneFollowerBump = Math.floor(
-              200 + Math.random() * 600 + s.mainGoalProgress * 5,
-            );
+            triggerEvent = { title: m.title, index };
             // Every 5th milestone — recommend new cast member.
             const totalCleared = milestones.filter((x) => x.completed).length;
             if (totalCleared > 0 && totalCleared % 5 === 0) {
-              milestoneNotif = {
+              unlockNotif = {
                 id: `n-unlock-${Date.now()}`,
                 charactersInvolved: [],
                 headline: "New connections unlocked",
                 preview: `Industry's noticing. Tap "+ Add character" in Goals to expand your cast — you've earned the next tier.`,
-                postId: undefined,
                 createdAt: nowLabel(),
               };
             }
@@ -2678,17 +2720,8 @@ export function GameProvider({ children }: PropsWithChildren) {
             mainGoalProgress: completed
               ? Math.min(100, s.mainGoalProgress + 14)
               : s.mainGoalProgress,
-            player: completed
-              ? {
-                  ...s.player,
-                  followers: s.player.followers + milestoneFollowerBump,
-                }
-              : s.player,
-            pendingBackgroundPosts: milestoneAftermathPost
-              ? [milestoneAftermathPost, ...s.pendingBackgroundPosts]
-              : s.pendingBackgroundPosts,
-            notifications: milestoneNotif
-              ? [milestoneNotif, ...s.notifications]
+            notifications: unlockNotif
+              ? [unlockNotif, ...s.notifications]
               : s.notifications,
             activityLog: completed
               ? [
@@ -2710,6 +2743,67 @@ export function GameProvider({ children }: PropsWithChildren) {
           }
           return next;
         });
+
+        // v1.2 — async milestone event. AI generates a "this happened
+        // to you" notification + follower delta + relationship shifts.
+        // Player has NO choice — pure notification material. Fires
+        // fire-and-forget so the click feels instant; the notification
+        // lands ~1-3 seconds later.
+        // Cast forces TS to widen — TS narrows the let to `never`
+        // because the closure assignment is invisible to inference.
+        const ev = triggerEvent as { title: string; index: number } | null;
+        if (ev) {
+          void (async () => {
+            const ref = stateRef.current;
+            try {
+              const result = await generateMilestoneEvent({
+                player: ref.player,
+                world: activeWorld,
+                milestoneTitle: ev.title,
+                milestoneIndex: ev.index,
+                cast,
+              });
+              setState((s) => {
+                // Apply relationship shifts.
+                const newContacts: typeof s.contacts = { ...s.contacts };
+                for (const sh of result.relationshipShifts) {
+                  const c = newContacts[sh.characterId];
+                  if (!c) continue;
+                  const newVibe = Math.max(-100, Math.min(100, c.vibe + sh.delta));
+                  newContacts[sh.characterId] = {
+                    ...c,
+                    vibe: newVibe,
+                    vibeDelta: sh.delta,
+                    vibeReason: sh.reason,
+                  };
+                }
+                const milestoneNotif: NotificationItem = {
+                  id: `n-milestone-${Date.now()}`,
+                  charactersInvolved: result.relationshipShifts.map(
+                    (sh) => sh.characterId,
+                  ),
+                  headline: result.headline,
+                  preview: result.body,
+                  createdAt: nowLabel(),
+                };
+                return {
+                  ...s,
+                  contacts: newContacts,
+                  notifications: [milestoneNotif, ...s.notifications],
+                  player: {
+                    ...s.player,
+                    followers: s.player.followers + result.followerDelta,
+                  },
+                  // Flag aiOnline based on whether AI returned a real
+                  // result vs. offline template.
+                  aiOnline: !result._fromOffline,
+                };
+              });
+            } catch (err) {
+              console.warn("[milestone-event] async failure:", err);
+            }
+          })();
+        }
       },
       skipMilestone: () => {
         softHaptic();
@@ -3009,7 +3103,7 @@ export function GameProvider({ children }: PropsWithChildren) {
         const outcome = await generateActivityOutcome({
           player: ref.player,
           world: activeWorld,
-          activity: { title, description, scheduledDay },
+          activity: { title, description, scheduledDay, scheduledHour },
           invitees,
           contacts: Object.fromEntries(
             Object.entries(ref.contacts).map(([id, c]) => [

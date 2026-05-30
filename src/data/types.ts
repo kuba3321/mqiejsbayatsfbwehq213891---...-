@@ -8,6 +8,11 @@ export type EventOutcome = {
   eventTitle: string;
   eventBody: string;
   choices: string[];
+  // v1.2 — event category. AI returns one of the 10 known categories
+  // (or any string if the model hallucinates); the reducer pushes it
+  // into recentEventCategories to drive anti-repetition next round.
+  // Optional so legacy fallback bank entries stay valid.
+  category?: string;
 };
 
 // Round 1.11.32 Faza C — image source widening. The migration to local
@@ -499,6 +504,13 @@ export type GameState = {
 
   // ===== Fala 1 #5 — Character notification mute =====
   mutedCharacterIds: string[];
+
+  // ===== v1.2 — Event anti-repetition queue =====
+  // Categories of the last 3 main events ("collab-offer", "drama-bait"
+  // etc). generateEvent reads this and instructs the AI to AVOID
+  // repeating these categories. Capped at 3 via slice(-3) so the queue
+  // self-trims. Cleared on resetSave / scenario change.
+  recentEventCategories: string[];
 
   // ===== Fala 2 — Favorites =====
   // IDs the player tapped the star on. Surfaced in ProfileScreen

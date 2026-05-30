@@ -353,7 +353,7 @@ export const worlds: World[] = [
     mainGoal: {
       title: "Conquer Award Season",
       description:
-        "Award season is here and the timeline is unhinged. Diss tracks at midnight, stan wars, leaked DMs, and one Grammy to rule them all.",
+        "Build the platform, the receipts, and the public goodwill to land the career-defining award arc — whatever shape it takes by the time you cross the finish line.",
     },
     setting:
       "A glossy, paparazzi-soaked award season in modern day Los Angeles. Every text, post, and outfit is currency. Stans are organized. Labels are watching.",

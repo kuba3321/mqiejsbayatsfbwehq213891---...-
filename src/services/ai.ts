@@ -750,31 +750,84 @@ const fallbackEventBank: EventOutcome[] = [
   },
 ];
 
+// v1.2 — event category catalogue. Used by generateEvent prompt as a
+// hard rotation list. Each category has a one-line directive so the AI
+// has concrete texture to draw on instead of defaulting to the same
+// "award show" beat over and over.
+const EVENT_CATEGORIES: Array<{ key: string; directive: string }> = [
+  { key: "collab-offer", directive: "Another celebrity wants to collab — a song, a campaign, a brand drop. The pitch comes with strings." },
+  { key: "drama-bait", directive: "A rival or outlet drops shade aimed at the player. Plausibly deniable. The crowd is watching how you react." },
+  { key: "press-moment", directive: "An interview, magazine cover, podcast, or talk-show booking lands. The angle they want is risky." },
+  { key: "party-invite", directive: "An exclusive event — premiere, gallery night, label party, club opening. Going changes alliances." },
+  { key: "viral-glitch", directive: "Something you posted is being misread or weaponised in real time. The takes are spiraling." },
+  { key: "fan-meltdown", directive: "A stan war flares — two fandoms are dragging each other and using your name as ammo. Pick a side or duck." },
+  { key: "industry-pull", directive: "Your label, manager, agent, or PR firm calls with a request that locks you in if you say yes." },
+  { key: "personal-life", directive: "Someone from before fame — family, an ex, an old friend — surfaces. Privately." },
+  { key: "pr-stumble", directive: "An out-of-context quote or photo is going around. Optics will be set by how you respond." },
+  { key: "chance-meeting", directive: "A random run-in with another celeb at the airport, gym, restaurant, gas station. Witnesses." },
+];
+
 export async function generateEvent(args: {
   player: PlayerProfile;
   world: World;
   day: number;
   recentLog: string[];
+  // v1.2 — last 3 event categories to AVOID. Empty array = fresh save.
+  recentCategories?: string[];
 }): Promise<EventOutcome> {
   if (!args.player.apiKey.trim()) {
     return fallbackEventBank[args.day % fallbackEventBank.length];
   }
 
+  // Filter out recently-used categories so the AI's choice pool
+  // naturally rotates. If all 10 are exhausted (impossible in a 3-deep
+  // window), fall back to the full list.
+  const blocked = new Set(args.recentCategories ?? []);
+  const allowed =
+    EVENT_CATEGORIES.filter((c) => !blocked.has(c.key)).length > 0
+      ? EVENT_CATEGORIES.filter((c) => !blocked.has(c.key))
+      : EVENT_CATEGORIES;
+  const categoryList = allowed
+    .map((c) => `- ${c.key}: ${c.directive}`)
+    .join("\n");
+  const blockedList =
+    args.recentCategories && args.recentCategories.length > 0
+      ? `\nDO NOT pick any of these recently-used categories: ${args.recentCategories.join(", ")}`
+      : "";
+
+  // v1.2 — main goal is now AMBIENT background, NOT a directive. The
+  // old prompt placed "Main goal: Win a Grammy" front and center,
+  // which made every single AI event riff on Grammy. We now mention
+  // the long-term arc only after the player crosses Day 25, and even
+  // then only as a flavour anchor — never as the event topic.
+  const goalBlock =
+    args.day > 25
+      ? `\nLONG-TERM ARC (background flavour only — DO NOT name it in eventTitle or eventBody): the player is working toward "${args.world.mainGoal.title}".`
+      : "";
+
   const system = `You are the story director for a social-media celebrity simulator called Status.
-Scenario: ${args.world.title}.
-Setting: ${args.world.setting ?? args.world.description}.
-Main goal: ${args.world.mainGoal.title} — ${args.world.mainGoal.description}.
+Scenario: ${args.world.title}. Setting: ${args.world.setting ?? args.world.description}.
 Player: ${args.player.name} (${args.player.handle}). ${args.player.bio}
-It is Day ${args.day}.
+Player's current public read: humor ${Math.round(args.player.socialPresence.humor)}/100, aura ${Math.round(args.player.socialPresence.aura)}/100.
+It is Day ${args.day}.${goalBlock}
+
 When NPCs appear in your prompts, treat each one's chemistry label (friends, rivals, spicy, lovers, enemies, chaos co-conspirators) as a tonal contract — rivals are passive-aggressive, lovers are warm with stakes, enemies are openly cold, etc.
+
+EVENT CATEGORIES — pick exactly ONE for this beat:
+${categoryList}${blockedList}
+
+Recent activity (do not repeat their flavour):
+${args.recentLog.slice(-3).join("\n") || "(quiet day)"}
+
 Generate the next MAIN EVENT for the player. Return STRICT JSON only, no commentary, in this shape:
 {
-  "eventTitle": "<short title 2-5 words>",
+  "category": "<one of the category keys above — exact string>",
+  "eventTitle": "<short title 2-5 words. NEVER name the main goal directly.>",
   "eventBody": "<1-2 sentence in-world prompt. Punchy, tabloid-coded. Always end with a question or imperative that demands a choice>",
   "choices": ["<choice 1>", "<choice 2>", "<choice 3>"]
 }`;
 
-  const userMsg = `Recent activity:\n${args.recentLog.slice(-6).join("\n") || "(quiet day)"}`;
+  const userMsg = `Generate event for Day ${args.day}.`;
 
   try {
     const text = await runLLM(args.player, {
@@ -796,6 +849,7 @@ Generate the next MAIN EVENT for the player. Return STRICT JSON only, no comment
         eventTitle: parsed.eventTitle as string,
         eventBody: parsed.eventBody as string,
         choices: (parsed.choices as string[]).slice(0, 3),
+        category: typeof parsed.category === "string" ? parsed.category : undefined,
       };
     }
   } catch {
@@ -2888,10 +2942,141 @@ export type ActivityOutcomeResult = {
   responses: Array<{ characterId: string; accepted: boolean; message: string }>;
 };
 
+// v1.2 — milestone event. Fires when the player clears any milestone.
+// Returns a small "this happened to you" beat with NO choices — pure
+// notification material. AI online: rich, scenario-aware. AI offline:
+// a deterministic 4-template fallback bank.
+//
+// Player explicitly asked for the "event you don't control" flavor —
+// no Modal pops, just a notification + a small follower delta. Keeps
+// the milestone system from feeling like a silent progress bar.
+export type MilestoneEventResult = {
+  headline: string;
+  body: string;
+  followerDelta: number;
+  relationshipShifts: Array<{ characterId: string; delta: number; reason: string }>;
+  _fromOffline?: boolean;
+};
+
+export async function generateMilestoneEvent(args: {
+  player: PlayerProfile;
+  world: World;
+  milestoneTitle: string;
+  milestoneIndex: number;
+  cast: Character[];
+}): Promise<MilestoneEventResult> {
+  const offlineFallback = (): MilestoneEventResult => {
+    const cast = args.cast;
+    const target = cast.length > 0 ? cast[Math.floor(Math.random() * cast.length)] : undefined;
+    const templates = [
+      {
+        headline: `"${args.milestoneTitle.slice(0, 50)}" lands`,
+        body: `The timeline picked it up at 3am. Outlets are recycling the same screenshot, and your handle is trending without you having to lift a finger.`,
+      },
+      {
+        headline: `Industry takes notice`,
+        body: `${target?.name ?? "Someone with stake in the game"} apparently messaged a mutual about your last move. Their PR team has not commented.`,
+      },
+      {
+        headline: `Press cycle catches fire`,
+        body: `A late-night host worked your milestone into a monologue. The clip is on every "for you" page within an hour.`,
+      },
+      {
+        headline: `The algorithm shifts`,
+        body: `Your engagement just doubled overnight. Nothing changed on your end. The room is reading you differently now.`,
+      },
+    ];
+    const pick = templates[Math.floor(Math.random() * templates.length)];
+    return {
+      ...pick,
+      followerDelta: Math.floor(150 + Math.random() * 500),
+      relationshipShifts: target
+        ? [
+            {
+              characterId: target.id,
+              delta: Math.random() > 0.4 ? 1.5 : -0.8,
+              reason: Math.random() > 0.4
+                ? `${target.name} liked the play`
+                : `${target.name} did not enjoy that`,
+            },
+          ]
+        : [],
+      _fromOffline: true,
+    };
+  };
+
+  if (!args.player.apiKey.trim() || args.cast.length === 0) {
+    return offlineFallback();
+  }
+
+  const castList = args.cast
+    .map((c) => `${c.id}: ${c.name} (${c.handle})`)
+    .join("\n");
+
+  const system = `You are the moment-narrator for a celebrity sim. The player just cleared a MILESTONE — something happened TO them as a result. The player has NO choice in the outcome.
+Scenario: ${args.world.title}. Setting: ${args.world.setting ?? args.world.description}.
+Player: ${args.player.name} (${args.player.handle}). ${args.player.bio}
+Milestone just cleared: "${args.milestoneTitle}"
+Milestone number ${args.milestoneIndex + 1} / 100 — the further in, the bigger the stakes.
+
+Available cast (use these exact ids for relationshipShifts, max 1-2 shifts):
+${castList}
+
+Return STRICT JSON only:
+{
+  "headline": "<5-8 word punchy headline like a push notification>",
+  "body": "<1-2 sentence in-world recap of what HAPPENED. Tabloid-coded, third-person about the player. NEVER a question — this is a thing the player learns about, not chooses.>",
+  "followerDelta": <integer 100..2000 — bigger for higher milestone index>,
+  "relationshipShifts": [
+    { "characterId": "<id>", "delta": <decimal -3.0..3.0 one decimal>, "reason": "<one short sentence>" }
+  ]
+}`;
+
+  try {
+    const text = await runLLM(args.player, {
+      system,
+      messages: [{ role: "user", content: `Milestone ${args.milestoneIndex + 1} just cleared.` }],
+      maxTokens: 350,
+      temperature: 0.9,
+      jsonResponse: true,
+    });
+    const parsed = safeParseJSON(text);
+    if (
+      parsed &&
+      typeof parsed.headline === "string" &&
+      typeof parsed.body === "string"
+    ) {
+      return {
+        headline: parsed.headline as string,
+        body: parsed.body as string,
+        followerDelta:
+          typeof parsed.followerDelta === "number"
+            ? Math.max(100, Math.min(2000, Math.floor(parsed.followerDelta)))
+            : 250,
+        relationshipShifts: Array.isArray(parsed.relationshipShifts)
+          ? (parsed.relationshipShifts as MilestoneEventResult["relationshipShifts"])
+              .filter((s) => args.cast.some((c) => c.id === s.characterId))
+              .slice(0, 2)
+          : [],
+      };
+    }
+  } catch (err) {
+    console.warn("[ai] generateMilestoneEvent failed; using offline:", err);
+  }
+  return offlineFallback();
+}
+
 export async function generateActivityOutcome(args: {
   player: PlayerProfile;
   world: World;
-  activity: { title: string; description: string; scheduledDay: number };
+  activity: {
+    title: string;
+    description: string;
+    scheduledDay: number;
+    // v1.2 — clock-hour (0-23) the activity was scheduled for. Drives
+    // outcome tone — late night = intimate/risky, morning = professional.
+    scheduledHour?: number;
+  };
   invitees: Character[];
   contacts: Record<string, { vibe: number; chemistryLabel: string }>;
 }): Promise<ActivityOutcomeResult | null> {
@@ -2915,10 +3100,32 @@ export async function generateActivityOutcome(args: {
       return `${c.id}: ${c.name} (${c.handle}) — ${c.bio}${chemHint}`;
     })
     .join("\n");
+  // v1.2 — time-of-day block. The hour acts as a tonal multiplier:
+  // late-night activities feel intimate / dangerous, morning ones
+  // feel transactional. AI uses this to colour the recap and the
+  // invitees' responses without us having to spell it out elsewhere.
+  const h = args.activity.scheduledHour;
+  const timeBlock =
+    typeof h === "number"
+      ? `Scheduled time: ${String(h).padStart(2, "0")}:00 ${
+          h < 6
+            ? "(late night — intimate, slightly dangerous tone; people are off-guard, secrets surface)"
+            : h < 11
+              ? "(morning — professional, hangovers, coffee, no-nonsense)"
+              : h < 14
+                ? "(midday — business casual, work-coded, lunch energy)"
+                : h < 18
+                  ? "(afternoon — relaxed, social, photo-op friendly)"
+                  : h < 22
+                    ? "(evening — prime time, dressed up, attention on you)"
+                    : "(late night — intimate, slightly dangerous tone; secrets surface)"
+        }.`
+      : "";
   const system = `You are the activity-outcome writer for a celebrity social sim.
 Scenario: ${args.world.title}. ${args.world.setting ?? ""}.
 Player: ${args.player.name} (${args.player.handle}).
 Activity: "${args.activity.title}" scheduled for Day ${args.activity.scheduledDay}.
+${timeBlock}
 Description: ${args.activity.description}
 Invitees (use their chemistry label to decide acceptance and tone — rivals = passive-aggressive, lovers = warm with stakes, enemies = openly cold, co-conspirators = secretive cooperation):
 ${list}

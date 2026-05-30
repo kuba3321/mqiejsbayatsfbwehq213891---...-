@@ -2364,6 +2364,48 @@ function GoalsScreen() {
 //  MESSAGES
 // ===================================================================
 
+// v1.2 — per-thread-reply heart with its own pop animation. Each
+// reply needs an INDEPENDENT Animated.Value so a tap on one doesn't
+// trigger every heart in the visible list — that's why this lives in
+// a subcomponent instead of an inline ref in the parent map.
+function ReplyHeart({
+  liked,
+  likes,
+  onPress,
+}: {
+  liked: boolean;
+  likes: number;
+  onPress: () => void;
+}) {
+  const scale = useRef(new Animated.Value(1)).current;
+  const pop = () => {
+    Animated.sequence([
+      Animated.timing(scale, { toValue: 1.4, duration: 110, useNativeDriver: true }),
+      Animated.spring(scale, { toValue: 1, useNativeDriver: true, damping: 8, stiffness: 200 }),
+    ]).start();
+  };
+  return (
+    <Pressable
+      onPress={() => {
+        pop();
+        onPress();
+      }}
+      style={{ flexDirection: "row", alignItems: "center", gap: 5 }}
+    >
+      <Animated.View style={{ transform: [{ scale }] }}>
+        <Heart
+          color={liked ? colors.pink : colors.muted}
+          fill={liked ? colors.pink : "transparent"}
+          size={14}
+        />
+      </Animated.View>
+      <AppText size={12} color={liked ? colors.pink : colors.muted}>
+        {formatCount(likes)}
+      </AppText>
+    </Pressable>
+  );
+}
+
 // Fala 3 — small ladder picker for 0-4 intensity. Used inside the
 // auto-contact scheduler modal.
 function IntensityPicker({
@@ -5036,19 +5078,15 @@ function PostDetailModal() {
               )}
             </AppText>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 16 }}>
-              <Pressable
+              {/* v1.2 — extracted ReplyHeart subcomponent with its own
+                  Animated.Value so each thread reply gets an independent
+                  pop animation on tap. Previously the header heart had
+                  the pop but per-reply hearts were static colour flip. */}
+              <ReplyHeart
+                liked={!!r.liked}
+                likes={r.likes}
                 onPress={() => likeThreadReply(post!.id, r.id)}
-                style={{ flexDirection: "row", alignItems: "center", gap: 5 }}
-              >
-                <Heart
-                  color={r.liked ? colors.pink : colors.muted}
-                  fill={r.liked ? colors.pink : "transparent"}
-                  size={14}
-                />
-                <AppText size={12} color={r.liked ? colors.pink : colors.muted}>
-                  {formatCount(r.likes)}
-                </AppText>
-              </Pressable>
+              />
               <Pressable
                 onPress={() => {
                   // Fala 1 #1 — unified composer. Tapping Reply on any

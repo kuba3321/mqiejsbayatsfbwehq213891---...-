@@ -27,9 +27,43 @@ export type ChangelogEntry = {
   sections: ChangelogSection[];
 };
 
-export const CURRENT_VERSION = "v1.1.1";
+export const CURRENT_VERSION = "v1.2";
 
 export const changelog: ChangelogEntry[] = [
+  {
+    tag: "v1.2",
+    title: "Story Variety",
+    date: "2026-05-30",
+    tagline:
+      "Events stop obsessing over the Grammy. Milestones are a real 100-deep road map with the algorithm narrating each one. Activity time of day actually changes how the night goes.",
+    sections: [
+      {
+        heading: "Events that aren't all about the Grammy",
+        bullets: [
+          "Event prompt rewritten. The main goal is no longer named in every prompt — instead the AI picks from 10 explicit event categories (collab-offer, drama-bait, press-moment, party-invite, viral-glitch, fan-meltdown, industry-pull, personal-life, pr-stumble, chance-meeting) and rotates through them.",
+          "Anti-repetition guarantee: the last 3 event categories are recorded in state and explicitly blocked in the next prompt. Two awards-show events in a row is impossible now.",
+          "Long-term arc only mentioned after Day 25, and even then strictly as background flavour — never the event topic.",
+          "Main goal copy in Accidentally Famous softened: \"one Grammy to rule them all\" → \"the career-defining award arc, whatever shape it takes\".",
+        ],
+      },
+      {
+        heading: "Milestones — 100-deep road map",
+        bullets: [
+          "Scenario init now pre-generates 100 milestones. Bank of 25 unique titles cycles 4× with rising XP curve — late-game milestones are meatier.",
+          "Every milestone completion fires a generateMilestoneEvent AI call. Returns a 1-2 sentence \"this happened to you\" beat + a follower delta + 1-2 relationship shifts. Player gets a NOTIFICATION (no choice, no modal) — it's the \"event you can't control\" pacing beat.",
+          "Every 5th milestone surfaces a 'New connections unlocked' notification suggesting expansion of the cast.",
+          "Offline fallback bank covers the AI for keyless / 503'd play.",
+        ],
+      },
+      {
+        heading: "Polish & details",
+        bullets: [
+          "Activity scheduledHour now flows into the AI prompt. 03:00 = intimate / risky tone, 09:00 = professional, 19:00 = prime-time dressed-up. Picking the hour finally matters.",
+          "Per-thread-reply heart animation. Every heart in a comment thread bounces on tap, not just the post-level one.",
+        ],
+      },
+    ],
+  },
   {
     tag: "v1.1.1",
     title: "Hardening",
