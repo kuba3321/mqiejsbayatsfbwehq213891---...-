@@ -388,6 +388,7 @@ export type GameState = {
   customizeWorldOpen: boolean;
   activityLogOpen: boolean;
   appSettingsOpen: boolean;
+  updatesOpen: boolean; // v1.1 — "What's new" modal flag
   addCharacterOpen: boolean;
   createActivityOpen: boolean;
   hideDMsInLog: boolean;

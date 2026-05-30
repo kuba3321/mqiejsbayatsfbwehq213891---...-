@@ -75,6 +75,7 @@ import {
   WorldDifficulty,
   WorldUpdateToast as WorldUpdateToastT,
 } from "@/data/types";
+import { changelog, CURRENT_VERSION } from "@/data/changelog";
 import { colors, radii } from "@/theme/tokens";
 
 import {
@@ -808,6 +809,8 @@ function GameShell() {
       {/* Fala 3 — main-goal win screen. Auto-triggers when
           mainGoalCompletedDay flips from null to a day number. */}
       <WinScreenModal />
+      {/* v1.1 — versioned changelog. Opens from Settings → What's new. */}
+      <UpdatesModal />
       {/* F1 — first-run tutorial overlay. Self-gates on onboardingSeen. */}
       <OnboardingOverlay />
     </View>
@@ -4266,7 +4269,7 @@ function ActivityLogModal() {
 // ===================================================================
 
 function AppSettingsModal() {
-  const { state, setAppSettingsOpen, updateProfile, leaveScenario, resetSave } = useGame();
+  const { state, setAppSettingsOpen, setUpdatesOpen, updateProfile, leaveScenario, resetSave } = useGame();
   const insets = useSafeAreaInsets();
   const [apiKey, setApiKey] = useState(state.player.apiKey);
   const [model, setModel] = useState(state.player.model);
@@ -4288,25 +4291,15 @@ function AppSettingsModal() {
             </AppText>
           </View>
 
-          {/* Refactor #11 — widget was a Pressable with no onPress
-              for many rounds (visual lie: "Tap to read" but nothing
-              happened). Now opens a What's New alert with the v1.0
-              launch summary so the chevron and the "Tap to read"
-              subtitle deliver on their promise. */}
+          {/* v1.1 — widget now opens a full UpdatesModal with the
+              complete versioned changelog (replaces the inline Alert
+              that only fit ~5 bullets). Latest version label inline
+              keeps the player oriented before they tap in. */}
           <Pressable
-            onPress={() =>
-              Alert.alert(
-                "What's new — v1.0",
-                [
-                  "• Crisis system: stan-wars-grade defense + Pop Craze diverts",
-                  "• Pre-fetched events + suggestions — 0 ms when you tap",
-                  "• Local avatar assets for every celeb / outlet / fan",
-                  "• Plus Jakarta Sans across the UI",
-                  "• Atomic save with corrupted-save preservation",
-                ].join("\n"),
-                [{ text: "OK" }],
-              )
-            }
+            onPress={() => {
+              setAppSettingsOpen(false);
+              setUpdatesOpen(true);
+            }}
             style={{
               flexDirection: "row",
               alignItems: "center",
@@ -4330,10 +4323,10 @@ function AppSettingsModal() {
             </View>
             <View style={{ flex: 1 }}>
               <AppText size={14} weight="900">
-                Important updates
+                What's new
               </AppText>
               <AppText size={12} color={colors.muted2}>
-                Tap to read
+                {CURRENT_VERSION} — {changelog[0]?.title}
               </AppText>
             </View>
             <ChevronRight color={colors.muted2} size={18} />
@@ -6526,6 +6519,169 @@ function EditCharacterModal() {
 // ===================================================================
 //  PR ACTIONS MODAL — Round 1.11.32 Faza D
 // ===================================================================
+// v1.1 — UpdatesModal. Versioned changelog accessed from Settings →
+// What's new. Renders the latest version first (changelog[0]) with a
+// hero block (tag, title, date, tagline), then each themed section as
+// a bulleted card. Past versions render in collapsed previews — tap to
+// expand. Lightweight, no extra deps, fits the existing modal aesthetic.
+function UpdatesModal() {
+  const { state, setUpdatesOpen } = useGame();
+  const insets = useSafeAreaInsets();
+  if (!state.updatesOpen) return null;
+  const latest = changelog[0];
+  return (
+    <Modal
+      visible
+      animationType="slide"
+      onRequestClose={() => setUpdatesOpen(false)}
+    >
+      <View style={{ flex: 1, backgroundColor: colors.bg }}>
+        <View
+          style={{
+            paddingTop: insets.top + 6,
+            paddingHorizontal: 14,
+            paddingBottom: 10,
+            flexDirection: "row",
+            alignItems: "center",
+            borderBottomColor: colors.divider,
+            borderBottomWidth: 1,
+          }}
+        >
+          <IconButton size={36} onPress={() => setUpdatesOpen(false)}>
+            <ArrowLeft color={colors.text} size={20} />
+          </IconButton>
+          <View style={{ flex: 1, alignItems: "center" }}>
+            <AppText size={16} weight="900">
+              What's new
+            </AppText>
+          </View>
+          <View style={{ width: 36 }} />
+        </View>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={{ padding: 18, paddingBottom: 60, gap: 16 }}
+        >
+          {/* Hero — latest version */}
+          {latest ? (
+            <View
+              style={{
+                backgroundColor: colors.surface,
+                borderRadius: 20,
+                padding: 18,
+                gap: 10,
+                borderWidth: 1,
+                borderColor: colors.divider,
+              }}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <View
+                  style={{
+                    backgroundColor: colors.blue,
+                    paddingHorizontal: 10,
+                    paddingVertical: 4,
+                    borderRadius: 999,
+                  }}
+                >
+                  <AppText size={12} weight="900">
+                    {latest.tag}
+                  </AppText>
+                </View>
+                <AppText size={12} color={colors.muted2}>
+                  {latest.date}
+                </AppText>
+              </View>
+              <AppText size={26} weight="900">
+                {latest.title}
+              </AppText>
+              <AppText size={14} color={colors.muted}>
+                {latest.tagline}
+              </AppText>
+            </View>
+          ) : null}
+
+          {/* Sections of the latest version */}
+          {latest?.sections.map((sec, i) => (
+            <View
+              key={`${latest.tag}-${i}`}
+              style={{
+                backgroundColor: colors.surface,
+                borderRadius: 16,
+                padding: 14,
+                gap: 8,
+              }}
+            >
+              <AppText size={15} weight="900">
+                {sec.heading}
+              </AppText>
+              {sec.bullets.map((b, j) => (
+                <View
+                  key={`${latest.tag}-${i}-${j}`}
+                  style={{ flexDirection: "row", gap: 8 }}
+                >
+                  <AppText size={13} color={colors.muted2}>
+                    •
+                  </AppText>
+                  <AppText
+                    size={13}
+                    color={colors.text}
+                    style={{ flex: 1, lineHeight: 19 }}
+                  >
+                    {b}
+                  </AppText>
+                </View>
+              ))}
+            </View>
+          ))}
+
+          {/* Older versions (compact preview). If there's only one
+              version, this section is empty — totally fine. */}
+          {changelog.length > 1 ? (
+            <>
+              <AppText
+                size={13}
+                color={colors.muted2}
+                style={{ marginTop: 10, marginBottom: 2 }}
+              >
+                Previous releases
+              </AppText>
+              {changelog.slice(1).map((entry) => (
+                <View
+                  key={entry.tag}
+                  style={{
+                    backgroundColor: colors.surface,
+                    borderRadius: 12,
+                    padding: 12,
+                    gap: 4,
+                  }}
+                >
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 8,
+                    }}
+                  >
+                    <AppText size={13} weight="900">
+                      {entry.tag} — {entry.title}
+                    </AppText>
+                    <View style={{ flex: 1 }} />
+                    <AppText size={11} color={colors.muted2}>
+                      {entry.date}
+                    </AppText>
+                  </View>
+                  <AppText size={12} color={colors.muted2}>
+                    {entry.tagline}
+                  </AppText>
+                </View>
+              ))}
+            </>
+          ) : null}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
 // Fala 3 — WinScreenModal. Triggers when mainGoalCompletedDay flips
 // from null to a day number (via maybeFireWinScreen in game-context).
 // Scenario-aware: in accidentally-famous, the body is a Grammy reveal;

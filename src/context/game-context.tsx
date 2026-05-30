@@ -289,6 +289,7 @@ function createInitialState(): GameState {
     customizeWorldOpen: false,
     activityLogOpen: false,
     appSettingsOpen: false,
+    updatesOpen: false,
     addCharacterOpen: false,
     createActivityOpen: false,
     hideDMsInLog: false,
@@ -444,6 +445,10 @@ type GameContextValue = {
   setCustomizeWorldOpen: (open: boolean) => void;
   setActivityLogOpen: (open: boolean) => void;
   setAppSettingsOpen: (open: boolean) => void;
+  // v1.1 — "What's new" modal accessible from Settings. Reader reads
+  // state.updatesOpen directly, matching how appSettingsOpen et al
+  // are handled in this codebase.
+  setUpdatesOpen: (open: boolean) => void;
   setAddCharacterOpen: (open: boolean) => void;
   setCreateActivityOpen: (open: boolean) => void;
   setEditingCharacterId: (id: string | null) => void;
@@ -1815,6 +1820,8 @@ export function GameProvider({ children }: PropsWithChildren) {
         setState((s) => ({ ...s, activityLogOpen })),
       setAppSettingsOpen: (appSettingsOpen) =>
         setState((s) => ({ ...s, appSettingsOpen })),
+      setUpdatesOpen: (updatesOpen) =>
+        setState((s) => ({ ...s, updatesOpen })),
       setAddCharacterOpen: (addCharacterOpen) =>
         setState((s) => ({ ...s, addCharacterOpen })),
       setCreateActivityOpen: (createActivityOpen) =>
