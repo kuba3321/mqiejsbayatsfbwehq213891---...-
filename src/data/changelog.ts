@@ -27,9 +27,35 @@ export type ChangelogEntry = {
   sections: ChangelogSection[];
 };
 
-export const CURRENT_VERSION = "v1.1";
+export const CURRENT_VERSION = "v1.1.1";
 
 export const changelog: ChangelogEntry[] = [
+  {
+    tag: "v1.1.1",
+    title: "Hardening",
+    date: "2026-05-30",
+    tagline:
+      "Auto-DMs now actually fire daily (without nuking the API), reported posts gracefully soft-delete, and the inbox can wake up to a real message from a configured contact.",
+    sections: [
+      {
+        heading: "Auto-DM engine wired (lazy)",
+        bullets: [
+          "Every day rollover (after each event), each cast member whose Auto-DM intensity is set rolls dice — 1 = 5%, 2 = 15%, 3 = 35%, 4 = 60%. Hits drop a fresh inbound message into the chat AND a notification.",
+          "Auto-invites use the same ladder. Hits create an ActivityInvite for tomorrow + an invite notification.",
+          "Lazy generation: messages and invites use a small per-chemistry offline bank. ZERO AI calls fire at rollover — the expensive call only happens when the player replies inside the chat (existing flow). No flood, no 503, no save corruption.",
+          "Hard cap of 1 DM + 1 invite per character per day even if both dice land.",
+        ],
+      },
+      {
+        heading: "Reports now soft-delete",
+        bullets: [
+          "Reported posts get a hidden:true flag instead of being filtered out of state.posts. Audit trail in reports[] stays consistent with a real (hidden) FeedPost.",
+          "All UI surfaces (feed FlatList, post detail, character profile post lists, favorites) filter on !hidden. A reported post the player had also favorited just vanishes from the favorites row.",
+          "Any in-flight applyPostReplies that targets a reported post now resolves to a ghost entry instead of being silently dropped.",
+        ],
+      },
+    ],
+  },
   {
     tag: "v1.1",
     title: "Beef Era",

@@ -128,6 +128,12 @@ export type FeedPost = {
   liked?: boolean;
   reposted?: boolean;
   starred?: boolean;
+  // v1.1.1 — soft delete flag. Reported posts get hidden:true instead
+  // of being filtered out of state.posts. Preserves the audit trail
+  // (reports[].postId still resolves) and keeps any in-flight
+  // applyPostReplies map call from operating against a missing slot.
+  // UI surfaces filter `posts.filter(p => !p.hidden)` before rendering.
+  hidden?: boolean;
   playerPost?: boolean;
   dayLabel?: string;
   imageUrl?: string;

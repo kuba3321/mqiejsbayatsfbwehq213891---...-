@@ -1141,7 +1141,10 @@ function FeedScreen() {
           ceiling is now bounded regardless of feed length, vs ScrollView
           which kept every post mounted forever. */}
       <FlatList
-        data={state.posts}
+        // v1.1.1 — soft delete filter. Reported posts carry hidden:true
+        // in state; we strip them here so they vanish from the feed
+        // but remain resolvable by any in-flight applyPostReplies map.
+        data={state.posts.filter((p) => !p.hidden)}
         keyExtractor={(post) => post.id}
         renderItem={({ item, index }) => (
           <FeedPostItem post={item} showDivider={index !== 0} />
@@ -3210,7 +3213,10 @@ function ProfileScreen() {
             <Card style={{ gap: 10 }}>
               {state.favoritedPostIds.slice(0, 6).map((pid) => {
                 const fp = state.posts.find((p) => p.id === pid);
-                if (!fp) return null;
+                // v1.1.1 — also skip if the post was reported (hidden).
+                // The favorite stays in state for restore-on-undo
+                // semantics; we just don't render the row.
+                if (!fp || fp.hidden) return null;
                 const fa =
                   fp.authorId === "player"
                     ? { name: state.player.name, handle: state.player.handle, avatar: state.player.avatar }
@@ -3437,7 +3443,7 @@ function ProfileScreen() {
         <AppText size={18} weight="900" style={{ marginTop: 22, marginBottom: 10 }}>
           Posts by {state.player.name.split(" ")[0]}
         </AppText>
-        {state.posts.filter((p) => p.authorId === "player").length === 0 ? (
+        {state.posts.filter((p) => p.authorId === "player" && !p.hidden).length === 0 ? (
           <Card style={{ alignItems: "center", gap: 8 }}>
             <AppText size={13} color={colors.muted2} style={{ textAlign: "center" }}>
               You haven't posted anything yet. Tap the + on the feed to write your first post.
@@ -3504,7 +3510,7 @@ function CharacterProfileModal() {
   const [chemistryPickerOpen, setChemistryPickerOpen] = useState(false);
 
   if (!id || !character) return null;
-  const posts = state.posts.filter((p) => p.authorId === id);
+  const posts = state.posts.filter((p) => p.authorId === id && !p.hidden);
 
   return (
     <Modal
@@ -4820,7 +4826,11 @@ function PostDetailModal() {
     reportPost,
   } = useGame();
   const insets = useSafeAreaInsets();
-  const post = state.posts.find((p) => p.id === state.openPostId);
+  // v1.1.1 — skip hidden posts. If the player reports the post they're
+  // viewing, the modal gracefully unmounts on the next state tick.
+  const post = state.posts.find(
+    (p) => p.id === state.openPostId && !p.hidden,
+  );
   const [reply, setReply] = useState("");
   const [sending, setSending] = useState(false);
   // Fala 1 #1 — activeReplyId is now the ONLY sub-reply state. When

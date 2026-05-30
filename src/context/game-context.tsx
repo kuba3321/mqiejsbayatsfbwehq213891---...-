@@ -1895,7 +1895,15 @@ export function GameProvider({ children }: PropsWithChildren) {
           }
           return {
             ...s,
-            posts: s.posts.filter((p) => p.id !== postId),
+            // v1.1.1 — soft delete. Mark hidden instead of filtering
+            // out. Keeps the audit trail intact: reports[].postId
+            // resolves to a real (hidden) FeedPost, any in-flight
+            // applyPostReplies that targets this post just updates a
+            // ghost entry instead of being silently dropped, and a
+            // future undo/restore action only has to flip the flag.
+            posts: s.posts.map((p) =>
+              p.id === postId ? { ...p, hidden: true } : p,
+            ),
             reports: [
               ...s.reports,
               {
@@ -2539,6 +2547,16 @@ export function GameProvider({ children }: PropsWithChildren) {
             if (eventCrisisOrigin) {
               next = applyCrisisDelta(next, 25, eventCrisisOrigin);
             }
+            // v1.1.1 — auto-DM / auto-invite lazy roll. Day just
+            // advanced; for each cast member whose autoContactConfig
+            // has nonzero intensity, roll dice. Each hit appends a
+            // ready-to-read DM (from a small offline bank, ZERO AI
+            // calls) OR an ActivityInvite to the corresponding state
+            // slice. Player sees notifications immediately; the
+            // expensive AI call happens only on player reply
+            // (existing requestCelebrityReply path). This is the
+            // "lazy generation" pattern — no flood at rollover.
+            next = rollProactiveContacts(next);
             return withXP(next, xpReward);
           });
         } finally {
@@ -3513,6 +3531,165 @@ function buildEventSummary(args: {
 }): string {
   const cleanOutcome = (args.outcome ?? "").split(".")[0].trim();
   return `${args.eventTitle}: player chose "${args.choice}". ${cleanOutcome}`.slice(0, 220);
+}
+
+// v1.1.1 — Auto-DM / auto-invite lazy roller. Runs ONCE per day
+// rollover (in completeEvent). For each cast contact with nonzero
+// autoContactConfig, rolls Math.random() against the intensity-tier
+// probability ladder:
+//   0 = off, 1 = 5%, 2 = 15%, 3 = 35%, 4 = 60%
+//
+// Hits write deterministic content directly into state — NO AI calls
+// here. This is the "lazy generation" pattern that prevents an API
+// flood at day rollover; the AI fires only when the player taps in
+// and replies (existing requestCelebrityReply path).
+//
+// DM hit: prepends a fresh inbound message to that contact's messages
+//   array + adds a notification.
+// Invite hit: creates an ActivityInvite + invite-style notification.
+//   Cast is auto-set to that single character.
+//
+// Deliberate caps: at most ONE DM and ONE invite per character per
+// day even if both rolls hit; this prevents a perfect-storm config
+// (intensity 4/4 across 8 contacts = 16 messages) from drowning the
+// inbox in a single tap.
+const INTENSITY_PROBABILITY = [0, 0.05, 0.15, 0.35, 0.6];
+
+const offlineProactiveOpeners: Record<string, string[]> = {
+  friends: [
+    "yo hbu?",
+    "ok where r u rn",
+    "you up?",
+    "this you?? 💀",
+    "i need to vent",
+  ],
+  rivals: [
+    "saw what you posted. cute.",
+    "interesting day for you huh",
+    "we should talk. or not. up to you.",
+    "every time i open the app it's u 😒",
+  ],
+  spicy: [
+    "what are you doing later 👀",
+    "you've been on my mind",
+    "this is dangerous",
+    "stop being on my fyp",
+  ],
+  lovers: [
+    "missed you today ❤️",
+    "thinking abt u",
+    "tell me about your day",
+    "come over",
+  ],
+  enemies: [
+    "I don't even know why I'm typing this.",
+    "stop tagging me.",
+    "this is the last message you get from me.",
+  ],
+  "co-conspirators": [
+    "the thing is in motion 👁️",
+    "delete this after reading.",
+    "phase 2 starting tonight",
+  ],
+  default: [
+    "hey",
+    "you around?",
+    "quick q",
+    "saw your post",
+  ],
+};
+
+const offlineProactiveInvites: Array<{ title: string; description: string }> = [
+  { title: "coffee", description: "low-key catch-up at my usual spot" },
+  { title: "studio session", description: "free booth tomorrow night, you in?" },
+  { title: "premiere", description: "got an extra plus-one" },
+  { title: "rooftop dinner", description: "tiny guest list, you should come" },
+  { title: "gym + smoothie", description: "early one. 7am. shut up." },
+];
+
+function rollProactiveContacts(state: GameState): GameState {
+  const config = state.autoContactConfig;
+  let next = state;
+  for (const [characterId, cfg] of Object.entries(config)) {
+    const contact = next.contacts[characterId];
+    if (!contact) continue; // contact may have been removed from cast
+    // DM roll
+    const dmProb =
+      INTENSITY_PROBABILITY[Math.min(4, Math.max(0, cfg.dmIntensity))];
+    if (Math.random() < dmProb) {
+      const chemKey =
+        contact.chemistry && offlineProactiveOpeners[contact.chemistry]
+          ? contact.chemistry
+          : "default";
+      const opener =
+        offlineProactiveOpeners[chemKey][
+          Math.floor(Math.random() * offlineProactiveOpeners[chemKey].length)
+        ];
+      const newMessage = {
+        id: `m-prox-${Date.now()}-${characterId}`,
+        sender: "character" as const,
+        text: opener,
+        createdAt: nowLabel(),
+      };
+      next = {
+        ...next,
+        contacts: {
+          ...next.contacts,
+          [characterId]: {
+            ...contact,
+            messages: [...contact.messages, newMessage].slice(-50),
+            preview: opener,
+          },
+        },
+        notifications: [
+          {
+            id: `n-prox-dm-${Date.now()}-${characterId}`,
+            charactersInvolved: [characterId],
+            headline: `${
+              (next.characterOverrides[characterId]?.name) ?? characterId
+            } texted you`,
+            preview: opener,
+            createdAt: nowLabel(),
+          },
+          ...next.notifications,
+        ],
+      };
+    }
+    // Invite roll (independent dice)
+    const invProb =
+      INTENSITY_PROBABILITY[Math.min(4, Math.max(0, cfg.inviteIntensity))];
+    if (Math.random() < invProb) {
+      const tpl =
+        offlineProactiveInvites[
+          Math.floor(Math.random() * offlineProactiveInvites.length)
+        ];
+      const activityId = `act-prox-${Date.now()}-${characterId}`;
+      const invite: ActivityInvite = {
+        id: activityId,
+        title: tpl.title,
+        description: tpl.description,
+        inviteeIds: [characterId],
+        scheduledDay: next.day + 1,
+        createdDay: next.day,
+      };
+      next = {
+        ...next,
+        activities: [invite, ...next.activities],
+        notifications: [
+          {
+            id: `n-prox-inv-${Date.now()}-${characterId}`,
+            charactersInvolved: [characterId],
+            headline: `Invite from ${characterId}`,
+            preview: `${tpl.title} — ${tpl.description}`,
+            createdAt: nowLabel(),
+            kind: "activity-invite",
+          },
+          ...next.notifications,
+        ],
+      };
+    }
+  }
+  return next;
 }
 
 // Fala 3 — main-goal completion helper. Called after any state mutation
